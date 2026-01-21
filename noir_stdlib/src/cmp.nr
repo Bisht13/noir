@@ -1,6 +1,6 @@
-use crate::meta::derive_via;
+// use crate::meta::derive_via;
 
-#[derive_via(derive_eq)]
+// #[derive_via(derive_eq)]
 // docs:start:eq-trait
 pub trait Eq {
     fn eq(self, other: Self) -> bool;
@@ -213,7 +213,7 @@ impl Ordering {
     }
 }
 
-#[derive_via(derive_ord)]
+// #[derive_via(derive_ord)]
 // docs:start:ord-trait
 pub trait Ord {
     fn cmp(self, other: Self) -> Ordering;
@@ -561,18 +561,18 @@ mod cmp_tests {
 
     #[test]
     fn sanity_check_min() {
-        assert_eq(min(0_u64, 1), 0);
-        assert_eq(min(0_u64, 0), 0);
-        assert_eq(min(1_u64, 1), 1);
-        assert_eq(min(255_u8, 0), 0);
+        assert_eq(min(0 as u64, 1 as u64), 0 as u64);
+        assert_eq(min(0 as u64, 0 as u64), 0 as u64);
+        assert_eq(min(1 as u64, 1 as u64), 1 as u64);
+        assert_eq(min(255 as u8, 0 as u8), 0 as u8);
     }
 
     #[test]
     fn sanity_check_max() {
-        assert_eq(max(0_u64, 1), 1);
-        assert_eq(max(0_u64, 0), 0);
-        assert_eq(max(1_u64, 1), 1);
-        assert_eq(max(255_u8, 0), 255);
+        assert_eq(max(0 as u64, 1 as u64), 1 as u64);
+        assert_eq(max(0 as u64, 0 as u64), 0 as u64);
+        assert_eq(max(1 as u64, 1 as u64), 1 as u64);
+        assert_eq(max(255 as u8, 0 as u8), 255 as u8);
     }
 
     #[test]

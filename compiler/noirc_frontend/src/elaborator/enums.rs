@@ -1,43 +1,34 @@
-//! Enum definition collection and variant resolution.
-
 use std::collections::{BTreeMap, BTreeSet};
 
+use fxhash::FxHashMap as HashMap;
 use iter_extended::{btree_map, try_vecmap, vecmap};
 use noirc_errors::Location;
+use num_bigint::BigUint;
 use rangemap::StepLite;
-use rustc_hash::FxHashMap as HashMap;
 
 use crate::{
-    DataType, EnumVariant as HirEnumVariant, Kind, Shared, Type,
+    DataType, Kind, Shared, Type,
     ast::{
         ConstructorExpression, EnumVariant, Expression, ExpressionKind, FunctionKind, Ident,
         ItemVisibility, Literal, NoirEnumeration, StatementKind, UnresolvedType,
-        UnresolvedTypeData,
     },
-    elaborator::{
-        UnstableFeature,
-        path_resolution::PathResolutionItem,
-        types::{WildcardAllowed, WildcardDisallowedContext},
-    },
+    elaborator::path_resolution::PathResolutionItem,
     hir::{
         comptime::Value,
-        def_collector::dc_crate::UnresolvedEnum,
         resolution::{errors::ResolverError, import::PathResolutionError},
         type_check::TypeCheckError,
     },
     hir_def::{
         expr::{
             Case, Constructor, HirBlockExpression, HirEnumConstructorExpression, HirExpression,
-            HirIdent, HirLiteral, HirMatch,
+            HirIdent, HirMatch,
         },
         function::{FuncMeta, FunctionBody, HirFunction, Parameters},
         stmt::{HirLetStatement, HirPattern, HirStatement},
     },
-    node_interner::{
-        DefinitionId, DefinitionKind, ExprId, FunctionModifiers, GlobalValue, ReferenceId, TypeId,
-    },
+    node_interner::{DefinitionId, DefinitionKind, ExprId, FunctionModifiers, GlobalValue, TypeId},
     shared::Visibility,
-    signed_field::SignedField,
+    signed_field::SignedInteger,
     token::Attributes,
 };
 
@@ -59,7 +50,7 @@ enum Pattern {
     /// A pattern checking for a tag and possibly binding variables such as `Some(42)`
     Constructor(Constructor, Vec<Pattern>),
     /// An integer literal pattern such as `4`, `12345`, or `-56`
-    Int(SignedField),
+    Int(SignedInteger),
     /// A pattern binding a variable such as `a` or `_`
     Binding(DefinitionId),
 
@@ -71,7 +62,7 @@ enum Pattern {
     /// An integer range pattern such as `1..20` which will match any integer n such that
     /// 1 <= n < 20.
     #[allow(unused)]
-    Range(SignedField, SignedField),
+    Range(SignedInteger, SignedInteger),
 
     /// An error occurred while translating this pattern. This Pattern kind always translates
     /// to a Fail branch in the decision tree, although the compiler is expected to halt
@@ -118,61 +109,6 @@ impl Row {
 }
 
 impl Elaborator<'_> {
-    pub(super) fn collect_enum_definitions(&mut self, enums: &BTreeMap<TypeId, UnresolvedEnum>) {
-        for (type_id, typ) in enums {
-            self.local_module = Some(typ.module_id);
-            self.generics.clear();
-
-            let datatype = self.interner.get_type(*type_id);
-            let datatype_ref = datatype.borrow();
-            let generics = datatype_ref.generic_types();
-            self.add_existing_generics(&typ.enum_def.generics, &datatype_ref.generics);
-
-            self.use_unstable_feature(UnstableFeature::Enums, datatype_ref.name.location());
-            drop(datatype_ref);
-
-            let self_type = Type::DataType(datatype.clone(), generics);
-            let self_type_id = self.interner.push_quoted_type(self_type.clone());
-            let location = typ.enum_def.location;
-            let unresolved =
-                UnresolvedType { typ: UnresolvedTypeData::Resolved(self_type_id), location };
-
-            datatype.borrow_mut().init_variants();
-            self.resolving_ids.insert(*type_id);
-
-            let wildcard_allowed = WildcardAllowed::No(WildcardDisallowedContext::EnumVariant);
-            for (i, variant) in typ.enum_def.variants.iter().enumerate() {
-                let parameters = variant.item.parameters.as_ref();
-                let types = parameters.map(|params| {
-                    vecmap(params, |typ| self.resolve_type(typ.clone(), wildcard_allowed))
-                });
-                let name = variant.item.name.clone();
-
-                let is_function = types.is_some();
-                let params = types.clone().unwrap_or_default();
-                datatype.borrow_mut().push_variant(HirEnumVariant::new(name, params, is_function));
-
-                self.define_enum_variant_constructor(
-                    &typ.enum_def,
-                    *type_id,
-                    &variant.item,
-                    types,
-                    i,
-                    &datatype,
-                    &self_type,
-                    unresolved.clone(),
-                );
-
-                let reference_id = ReferenceId::EnumVariant(*type_id, i);
-                let location = variant.item.name.location();
-                self.interner.add_definition_location(reference_id, location);
-            }
-
-            self.resolving_ids.remove(type_id);
-        }
-        self.generics.clear();
-    }
-
     /// Defines the value of an enum variant that we resolve an enum
     /// variant expression to. E.g. `Foo::Bar` in `Foo::Bar(baz)`.
     ///
@@ -248,13 +184,14 @@ impl Elaborator<'_> {
         let no_parameters = Parameters(Vec::new());
         let global_body =
             self.make_enum_variant_constructor(datatype, variant_index, &no_parameters, location);
-        let let_statement = HirStatement::Expression(global_body);
+        let let_statement = crate::hir_def::stmt::HirStatement::Expression(global_body);
 
         let statement_id = self.interner.get_global(global_id).let_statement;
         self.interner.replace_statement(statement_id, let_statement);
 
-        self.interner.get_global_mut(global_id).value =
-            GlobalValue::Resolved(Value::Enum(variant_index, Vec::new(), typ));
+        self.interner.get_global_mut(global_id).value = GlobalValue::Resolved(
+            crate::hir::comptime::Value::Enum(variant_index, Vec::new(), typ),
+        );
 
         Self::get_module_mut(self.def_maps, type_id.module_id())
             .declare_global(name.clone(), enum_.visibility, global_id)
@@ -338,23 +275,23 @@ impl Elaborator<'_> {
             .ok();
     }
 
-    /// Given:
-    /// ```ignore
-    /// enum FooEnum { Foo(u32, u8), ... }
-    ///
-    /// fn Foo(a: u32, b: u8) -> FooEnum {}
-    /// ```
-    /// Create (pseudocode):
-    /// ```ignore
-    /// fn Foo(a: u32, b: u8) -> FooEnum {
-    ///     // This can't actually be written directly in Noir
-    ///     FooEnum {
-    ///         tag: Foo_tag,
-    ///         Foo: (a, b),
-    ///         // fields from other variants are zeroed in monomorphization
-    ///     }
-    /// }
-    /// ```
+    // Given:
+    // ```
+    // enum FooEnum { Foo(u32, u8), ... }
+    //
+    // fn Foo(a: u32, b: u8) -> FooEnum {}
+    // ```
+    // Create (pseudocode):
+    // ```
+    // fn Foo(a: u32, b: u8) -> FooEnum {
+    //     // This can't actually be written directly in Noir
+    //     FooEnum {
+    //         tag: Foo_tag,
+    //         Foo: (a, b),
+    //         // fields from other variants are zeroed in monomorphization
+    //     }
+    // }
+    // ```
     fn make_enum_variant_constructor(
         &mut self,
         self_type: &Shared<DataType>,
@@ -365,11 +302,12 @@ impl Elaborator<'_> {
         // Each parameter of the enum variant function is used as a parameter of the enum
         // constructor expression
         let arguments = vecmap(&parameters.0, |(pattern, typ, _)| match pattern {
-            HirPattern::Identifier(ident) => self.interner.push_expr_full(
-                HirExpression::Ident(ident.clone(), None),
-                location,
-                typ.clone(),
-            ),
+            HirPattern::Identifier(ident) => {
+                let id = self.interner.push_expr(HirExpression::Ident(ident.clone(), None));
+                self.interner.push_expr_type(id, typ.clone());
+                self.interner.push_expr_location(id, location);
+                id
+            }
             _ => unreachable!(),
         });
 
@@ -379,9 +317,12 @@ impl Elaborator<'_> {
             variant_index,
         });
 
+        let body = self.interner.push_expr(constructor);
         let enum_generics = self_type.borrow().generic_types();
         let typ = Type::DataType(self_type.clone(), enum_generics);
-        self.interner.push_expr_full(constructor, location, typ)
+        self.interner.push_expr_type(body, typ);
+        self.interner.push_expr_location(body, location);
+        body
     }
 
     fn make_enum_variant_parameters(
@@ -466,12 +407,6 @@ impl Elaborator<'_> {
                     None => self.interner.next_type_variable_with_kind(Kind::IntegerOrField),
                 };
                 unify_with_expected_type(self, &actual);
-
-                let expr = HirExpression::Literal(HirLiteral::Integer(value));
-                let location = expr_location;
-                let expr_id = self.interner.push_expr_full(expr, location, actual.clone());
-                self.push_integer_literal_expr_id(expr_id);
-
                 Pattern::Int(value)
             }
             ExpressionKind::Literal(Literal::Bool(value)) => {
@@ -619,8 +554,7 @@ impl Elaborator<'_> {
         variables_defined: &mut Vec<Ident>,
     ) -> Pattern {
         let location = constructor.typ.location;
-        let wildcard_allowed = WildcardAllowed::Yes;
-        let typ = self.resolve_type(constructor.typ, wildcard_allowed);
+        let typ = self.resolve_type(constructor.typ);
 
         let Some((struct_name, mut expected_field_types)) =
             self.struct_name_and_field_types(&typ, location)
@@ -764,7 +698,7 @@ impl Elaborator<'_> {
                 // TODO(#7430): Take type_turbofish into account when instantiating the function's type
                 let meta = self.interner.function_meta(func_id);
                 let Some(variant_index) = meta.enum_variant_index else {
-                    let item = resolution.description(self.interner);
+                    let item = resolution.description();
                     self.push_err(ResolverError::UnexpectedItemInPattern { location, item });
                     return Pattern::Error;
                 };
@@ -782,7 +716,6 @@ impl Elaborator<'_> {
             | PathResolutionItem::TypeAlias(_)
             | PathResolutionItem::PrimitiveType(_)
             | PathResolutionItem::Trait(_)
-            | PathResolutionItem::TraitAssociatedType(..)
             | PathResolutionItem::ModuleFunction(_)
             | PathResolutionItem::TypeAliasFunction(..)
             | PathResolutionItem::TraitFunction(..)
@@ -803,7 +736,7 @@ impl Elaborator<'_> {
                         variables_defined,
                     );
                 } else {
-                    let item = resolution.description(self.interner);
+                    let item = resolution.description();
                     self.push_err(ResolverError::UnexpectedItemInPattern { location, item });
                     return Pattern::Error;
                 }
@@ -846,20 +779,43 @@ impl Elaborator<'_> {
             expr_location: location,
         });
 
+        // // Convert a signed integer type like i32 to SignedInteger
+        // macro_rules! signed_to_signed_integer {
+        //     ($value:expr) => {
+        // {
+        //         let negative = $value < 0;
+        //         // Widen the value so that SignedType::MIN does not wrap to 0 when negated below
+        //         let mut widened = $value as i128;
+        //         if negative {
+        //             widened = -widened;
+        //         }
+        //         SignedInteger::new(BigUint::from(widened.abs() as u128), negative)
+        // }
+        //     };
+        // }
+
         let value = match constant {
-            Value::Bool(value) => SignedField::positive(value),
+            Value::Bool(value) => SignedInteger::positive(value),
             Value::Field(value) => value,
-            Value::I8(value) => SignedField::from_signed(value),
-            Value::I16(value) => SignedField::from_signed(value),
-            Value::I32(value) => SignedField::from_signed(value),
-            Value::I64(value) => SignedField::from_signed(value),
-            Value::U1(value) => SignedField::positive(value),
-            Value::U8(value) => SignedField::positive(u128::from(value)),
-            Value::U16(value) => SignedField::positive(u128::from(value)),
-            Value::U32(value) => SignedField::positive(value),
-            Value::U64(value) => SignedField::positive(value),
-            Value::U128(value) => SignedField::positive(value),
-            Value::Zeroed(_) => SignedField::positive(0u32),
+            Value::I8(value) => {
+                SignedInteger::new(BigUint::from(value.unsigned_abs()), value.is_negative())
+            }
+            Value::I16(value) => {
+                SignedInteger::new(BigUint::from(value.unsigned_abs()), value.is_negative())
+            }
+            Value::I32(value) => {
+                SignedInteger::new(BigUint::from(value.unsigned_abs()), value.is_negative())
+            }
+            Value::I64(value) => {
+                SignedInteger::new(BigUint::from(value.unsigned_abs()), value.is_negative())
+            }
+            Value::U1(value) => SignedInteger::positive(value),
+            Value::U8(value) => SignedInteger::positive(value as u128),
+            Value::U16(value) => SignedInteger::positive(value as u128),
+            Value::U32(value) => SignedInteger::positive(value),
+            Value::U64(value) => SignedInteger::positive(value),
+            Value::U128(value) => SignedInteger::positive(value),
+            Value::Zeroed(_) => SignedInteger::positive(0u32),
             _ => {
                 self.push_err(ResolverError::NonIntegerGlobalUsedInPattern { location });
                 return Pattern::Error;
@@ -938,7 +894,7 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         self.push_tests_against_bare_variables(&mut rows);
 
         // If the first row is a match-all we match it and the remaining rows are ignored.
-        if rows.first().unwrap().columns.is_empty() {
+        if rows.first().is_some_and(|row| row.columns.is_empty()) {
             let row = rows.remove(0);
 
             return Ok(match row.guard {
@@ -954,6 +910,7 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         }
 
         let branch_var = self.branch_variable(&rows);
+        let location = self.elaborator.interner.definition(branch_var).location;
 
         let definition_type = self.elaborator.interner.definition_type(branch_var);
         match definition_type.follow_bindings_shallow().into_owned() {
@@ -981,18 +938,16 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
                 Ok(HirMatch::Switch(branch_var, cases, fallback))
             }
             Type::Tuple(fields) => {
-                let location = self.elaborator.interner.definition(branch_var).location;
                 let field_variables = self.fresh_match_variables(fields.clone(), location);
                 let cases = vec![(Constructor::Tuple(fields), field_variables, Vec::new())];
                 let (cases, fallback) = self.compile_constructor_cases(rows, branch_var, cases)?;
                 Ok(HirMatch::Switch(branch_var, cases, fallback))
             }
-            Type::DataType(type_definition, generics) => {
-                let location = self.elaborator.interner.definition(branch_var).location;
-                let definition = type_definition.borrow();
-                if let Some(variants) = definition.get_variants(&generics) {
-                    drop(definition);
-                    let typ = Type::DataType(type_definition, generics);
+            Type::DataType(type_def, generics) => {
+                let def = type_def.borrow();
+                if let Some(variants) = def.get_variants(&generics) {
+                    drop(def);
+                    let typ = Type::DataType(type_def, generics);
 
                     let cases = vecmap(variants.iter().enumerate(), |(idx, (_name, args))| {
                         let constructor = Constructor::Variant(typ.clone(), idx);
@@ -1003,9 +958,9 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
                     let (cases, fallback) =
                         self.compile_constructor_cases(rows, branch_var, cases)?;
                     Ok(HirMatch::Switch(branch_var, cases, fallback))
-                } else if let Some(fields) = definition.get_fields(&generics) {
-                    drop(definition);
-                    let typ = Type::DataType(type_definition, generics);
+                } else if let Some(fields) = def.get_fields(&generics) {
+                    drop(def);
+                    let typ = Type::DataType(type_def, generics);
 
                     // Just treat structs as a single-variant type
                     let fields = vecmap(fields, |(_name, typ, _)| typ);
@@ -1016,34 +971,29 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
                         self.compile_constructor_cases(rows, branch_var, cases)?;
                     Ok(HirMatch::Switch(branch_var, cases, fallback))
                 } else {
-                    drop(definition);
-                    let typ = Type::DataType(type_definition, generics);
+                    drop(def);
+                    let typ = Type::DataType(type_def, generics);
                     Err(ResolverError::TypeUnsupportedInMatch { typ, location })
                 }
             }
             // We could match on these types in the future
             typ @ (Type::Array(_, _)
-            | Type::Vector(_)
+            | Type::Slice(_)
             | Type::String(_)
-            // Some of these may be possible to match on:
-            | Type::FmtString(_, _)
-            | Type::Reference(..)
-            | Type::Quoted(_)
-
-            // These seem unlikely to be able to be matched on:
-            | Type::Constant(_, _)
-            | Type::CheckedCast { .. }
-            | Type::NamedGeneric(_)
-
-            // But we don't expect to ever be able to match on these:
+            // But we'll never be able to match on these
             | Type::Alias(_, _)
             | Type::TypeVariable(_)
+            | Type::FmtString(_, _)
             | Type::TraitAsType(_, _, _)
+            | Type::NamedGeneric(_)
+            | Type::CheckedCast { .. }
             | Type::Function(_, _, _, _)
+            | Type::Reference(..)
             | Type::Forall(_, _)
+            | Type::Constant(_, _)
+            | Type::Quoted(_)
             | Type::InfixExpr(_, _, _, _)
             | Type::Error) => {
-                let location = self.elaborator.interner.definition(branch_var).location;
                 Err(ResolverError::TypeUnsupportedInMatch { typ, location })
             },
         }
@@ -1066,16 +1016,8 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         location: Location,
     ) -> DefinitionId {
         let name = format!("internal_match_variable_{index}");
-        let definition_kind = DefinitionKind::Local(None);
-        let mutable = false;
-        let comptime = false;
-        let id = self.elaborator.interner.push_definition(
-            name,
-            mutable,
-            comptime,
-            definition_kind,
-            location,
-        );
+        let kind = DefinitionKind::Local(None);
+        let id = self.elaborator.interner.push_definition(name, false, false, kind, location);
         self.elaborator.interner.push_definition_type(id, variable_type);
         id
     }
@@ -1089,16 +1031,17 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         rows: Vec<Row>,
         branch_var: DefinitionId,
     ) -> Result<(Vec<Case>, Box<HirMatch>), ResolverError> {
-        // Elements of 'raw_cases' are of the form (Constructor, Variables, Rows)
         let mut raw_cases: Vec<(Constructor, Vec<DefinitionId>, Vec<Row>)> = Vec::new();
-        let mut fallback_rows: Vec<Row> = Vec::new();
-        let mut tested: HashMap<(SignedField, SignedField), usize> = HashMap::default();
+        let mut fallback_rows = Vec::new();
+        let mut tested: HashMap<(SignedInteger, SignedInteger), usize> = HashMap::default();
 
         for mut row in rows {
             if let Some(col) = row.remove_column(branch_var) {
                 let (key, cons) = match col.pattern {
-                    Pattern::Int(val) => ((val, val), Constructor::Int(val)),
-                    Pattern::Range(start, stop) => ((start, stop), Constructor::Range(start, stop)),
+                    Pattern::Int(val) => ((val.clone(), val.clone()), Constructor::Int(val)),
+                    Pattern::Range(start, stop) => {
+                        ((start.clone(), stop.clone()), Constructor::Range(start, stop))
+                    }
                     // Any other pattern shouldn't have an integer type and we expect a type
                     // check error to already have been issued.
                     _ => continue,
@@ -1111,22 +1054,22 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
 
                 tested.insert(key, raw_cases.len());
 
-                let mut inner_rows = fallback_rows.clone();
+                let mut rows = fallback_rows.clone();
 
-                inner_rows.push(row);
-                raw_cases.push((cons, Vec::new(), inner_rows));
+                rows.push(row);
+                raw_cases.push((cons, Vec::new(), rows));
             } else {
-                for (_, _, inner_rows) in &mut raw_cases {
-                    inner_rows.push(row.clone());
+                for (_, _, rows) in &mut raw_cases {
+                    rows.push(row.clone());
                 }
 
                 fallback_rows.push(row);
             }
         }
 
-        let cases = try_vecmap(raw_cases, |(constructors, variables, rows)| {
+        let cases = try_vecmap(raw_cases, |(cons, vars, rows)| {
             let rows = self.compile_rows(rows)?;
-            Ok::<_, ResolverError>(Case::new(constructors, variables, rows))
+            Ok::<_, ResolverError>(Case::new(cons, vars, rows))
         })?;
 
         Ok((cases, Box::new(self.compile_rows(fallback_rows)?)))
@@ -1183,14 +1126,6 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         }
 
         let cases = try_vecmap(cases, |(cons, vars, rows)| {
-            assert!(matches!(
-                cons,
-                Constructor::True
-                    | Constructor::False
-                    | Constructor::Unit
-                    | Constructor::Tuple(_)
-                    | Constructor::Variant(..)
-            ));
             let rows = self.compile_rows(rows)?;
             Ok::<_, ResolverError>(Case::new(cons, vars, rows))
         })?;
@@ -1200,7 +1135,7 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
 
     /// Move any cases with duplicate branches into a shared 'else' branch
     fn deduplicate_cases(mut cases: Vec<Case>) -> (Vec<Case>, Option<Box<HirMatch>>) {
-        let mut opt_else_case = None;
+        let mut else_case = None;
         let mut ending_cases = Vec::with_capacity(cases.len());
         let mut previous_case: Option<Case> = None;
 
@@ -1214,7 +1149,7 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         //   case, not just the first duplicated case we find. I suspect in most
         //   actual code snippets these are the same but it could still be nice to guarantee.
         while let Some(case) = cases.pop() {
-            if let Some(else_case) = &opt_else_case {
+            if let Some(else_case) = &else_case {
                 if case.body == *else_case {
                     // Delete the current case by not pushing it to `ending_cases`
                     continue;
@@ -1223,8 +1158,8 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
                 }
             } else if let Some(previous) = previous_case {
                 if case.body == previous.body {
-                    // opt_else_case is known to be None here
-                    opt_else_case = Some(previous.body);
+                    // else_case is known to be None here
+                    else_case = Some(previous.body);
 
                     // Delete both previous_case and case
                     previous_case = None;
@@ -1243,13 +1178,11 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         }
 
         ending_cases.reverse();
-        (ending_cases, opt_else_case.map(Box::new))
+        (ending_cases, else_case.map(Box::new))
     }
 
-    /// Return the variable that was referred to the most in `rows`, or panic if there are zero
-    /// `rows`
+    /// Return the variable that was referred to the most in `rows`
     fn branch_variable(&mut self, rows: &[Row]) -> DefinitionId {
-        assert!(!rows.is_empty(), "ICE branch_variable: expected at least one row");
         let mut counts = HashMap::default();
 
         for row in rows {
@@ -1289,7 +1222,9 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         let variable = HirIdent::non_trait_method(variable, location);
 
         let rhs = HirExpression::Ident(HirIdent::non_trait_method(rhs, location), None);
-        let rhs = self.elaborator.interner.push_expr_full(rhs, location, rhs_type);
+        let rhs = self.elaborator.interner.push_expr(rhs);
+        self.elaborator.interner.push_expr_type(rhs, rhs_type);
+        self.elaborator.interner.push_expr_location(rhs, location);
 
         let let_ = HirStatement::Let(HirLetStatement {
             pattern: HirPattern::Identifier(variable),
@@ -1301,12 +1236,17 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         });
 
         let body_type = self.elaborator.interner.id_type(body);
-        let let_ = self.elaborator.interner.push_stmt_full(let_, location);
-        let body =
-            self.elaborator.interner.push_stmt_full(HirStatement::Expression(body), location);
+        let let_ = self.elaborator.interner.push_stmt(let_);
+        let body = self.elaborator.interner.push_stmt(HirStatement::Expression(body));
+
+        self.elaborator.interner.push_stmt_location(let_, location);
+        self.elaborator.interner.push_stmt_location(body, location);
 
         let block = HirExpression::Block(HirBlockExpression { statements: vec![let_, body] });
-        self.elaborator.interner.push_expr_full(block, location, body_type)
+        let block = self.elaborator.interner.push_expr(block);
+        self.elaborator.interner.push_expr_type(block, body_type);
+        self.elaborator.interner.push_expr_location(block, location);
+        block
     }
 
     /// Any case that isn't branched to when the match is finished must be covered by another
@@ -1397,13 +1337,13 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
     fn missing_cases(&self, cases: &[Case], typ: &Type) -> Vec<(String, Vec<DefinitionId>)> {
         // We expect `cases` to come from a `Switch` which should always have
         // at least 2 cases, otherwise it should be a Success or Failure node.
-        let first_case = &cases[0];
+        let first = &cases[0];
 
-        if matches!(&first_case.constructor, Constructor::Int(_) | Constructor::Range(..)) {
+        if matches!(&first.constructor, Constructor::Int(_) | Constructor::Range(..)) {
             return self.missing_integer_cases(cases, typ);
         }
 
-        let all_constructors = first_case.constructor.all_constructors();
+        let all_constructors = first.constructor.all_constructors();
         let mut all_constructors =
             btree_map(all_constructors, |(constructor, arg_count)| (constructor, arg_count));
 
@@ -1434,18 +1374,19 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
 
         let mut missing_cases = rangemap::RangeInclusiveSet::new();
 
-        let int_max = SignedField::positive(typ.integral_maximum_size().unwrap());
+        let int_max =
+            SignedInteger::positive(typ.integral_maximum_size().unwrap().get_maximum_size());
         let int_min = typ.integral_minimum_size().unwrap();
         missing_cases.insert(int_min..=int_max);
 
         for case in cases {
             match &case.constructor {
                 Constructor::Int(signed_field) => {
-                    missing_cases.remove(*signed_field..=*signed_field);
+                    missing_cases.remove(signed_field.clone()..=signed_field.clone());
                 }
                 Constructor::Range(start, end) => {
                     // Our ranges are exclusive, so adjust for that
-                    missing_cases.remove(*start..=end.sub_one());
+                    missing_cases.remove(start.clone()..=end.sub_one());
                 }
                 _ => unreachable!(
                     "missing_integer_cases should only be called with Int or Range constructors"
@@ -1457,7 +1398,6 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
             if range.start() == range.end() {
                 (format!("{}", range.start()), Vec::new())
             } else {
-                assert!(range.start() < range.end());
                 (format!("{}..={}", range.start(), range.end()), Vec::new())
             }
         })
@@ -1467,7 +1407,7 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
         starting_id: DefinitionId,
         env: &HashMap<DefinitionId, (String, Vec<DefinitionId>)>,
     ) -> String {
-        let Some((constructor_str, arguments)) = env.get(&starting_id) else {
+        let Some((constructor, arguments)) = env.get(&starting_id) else {
             return WILDCARD_PATTERN.to_string();
         };
 
@@ -1475,6 +1415,6 @@ impl<'elab, 'ctx> MatchCompiler<'elab, 'ctx> {
 
         let args = vecmap(arguments, |arg| Self::construct_missing_case(*arg, env)).join(", ");
 
-        if no_arguments { constructor_str.clone() } else { format!("{constructor_str}({args})") }
+        if no_arguments { constructor.clone() } else { format!("{constructor}({args})") }
     }
 }

@@ -45,6 +45,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use acvm::acir::AcirField;
 use noirc_errors::call_stack::{CallStack, CallStackId};
+use num_traits::Zero;
 
 use crate::{
     errors::RuntimeError,

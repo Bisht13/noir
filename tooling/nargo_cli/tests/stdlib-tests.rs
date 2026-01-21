@@ -8,6 +8,7 @@ use noirc_frontend::hir::FunctionNameMatch;
 use std::io::Write;
 use std::{collections::BTreeMap, path::PathBuf};
 
+use m31_blackbox_solver::M31BlackBoxSolver;
 use nargo::{
     ops::{TestStatus, report_errors, run_test},
     package::{Package, PackageType},
@@ -58,12 +59,12 @@ fn run_stdlib_tests(force_brillig: bool, inliner_aggressiveness: i64) {
     let dummy_package = Package {
         version: None,
         compiler_required_version: None,
-        compiler_required_unstable_features: Vec::new(),
         root_dir: PathBuf::from("."),
         package_type: PackageType::Binary,
         entry_path: PathBuf::from("main.nr"),
         name: "stdlib".parse().unwrap(),
         dependencies: BTreeMap::new(),
+        expression_width: None,
     };
 
     let (mut context, dummy_crate_id) =
@@ -85,13 +86,14 @@ fn run_stdlib_tests(force_brillig: bool, inliner_aggressiveness: i64) {
     let test_report: Vec<(String, TestStatus)> = test_functions
         .into_iter()
         .map(|(test_name, test_function)| {
+            let pedantic_solving = true;
             let mut context = match context.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(), // Ignore, it happened during execution.
             };
             let status = std::panic::catch_unwind(move || {
                 run_test(
-                    &bn254_blackbox_solver::Bn254BlackBoxSolver,
+                    &m31_blackbox_solver::M31BlackBoxSolver(pedantic_solving),
                     &mut context,
                     &test_function,
                     std::io::stdout(),
@@ -150,7 +152,7 @@ fn display_test_report(
                 if let Some(diag) = error_diagnostic {
                     noirc_errors::reporter::report_all(
                         file_manager.as_file_map(),
-                        std::slice::from_ref(diag),
+                        &[diag.clone()],
                         compile_options.deny_warnings,
                         compile_options.silence_warnings,
                     );
@@ -165,7 +167,7 @@ fn display_test_report(
             TestStatus::CompileError(err) => {
                 noirc_errors::reporter::report_all(
                     file_manager.as_file_map(),
-                    std::slice::from_ref(err),
+                    &[err.clone()],
                     compile_options.deny_warnings,
                     compile_options.silence_warnings,
                 );

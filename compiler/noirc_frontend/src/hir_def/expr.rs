@@ -9,7 +9,7 @@ use crate::node_interner::pusher::{HasLocation, PushedExpr};
 use crate::node_interner::{
     DefinitionId, DefinitionKind, ExprId, FuncId, NodeInterner, StmtId, TraitId, TraitItemId,
 };
-use crate::signed_field::SignedField;
+use crate::signed_field::SignedInteger;
 use crate::token::{FmtStrFragment, Tokens};
 
 use super::stmt::HirPattern;
@@ -128,7 +128,7 @@ pub enum HirLiteral {
     Array(HirArrayLiteral),
     Vector(HirArrayLiteral),
     Bool(bool),
-    Integer(SignedField),
+    Integer(SignedInteger),
     Str(String),
     FmtStr(Vec<FmtStrFragment>, Vec<ExprId>, u32 /* length */),
     Unit,
@@ -438,10 +438,10 @@ pub enum Constructor {
     True,
     False,
     Unit,
-    Int(SignedField),
+    Int(SignedInteger),
     Tuple(Vec<Type>),
     Variant(Type, usize),
-    Range(SignedField, SignedField),
+    Range(SignedInteger, SignedInteger),
 }
 
 impl Constructor {

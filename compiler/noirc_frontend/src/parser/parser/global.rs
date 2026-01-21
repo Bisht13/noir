@@ -65,8 +65,8 @@ fn ident_to_pattern(ident: Ident, mutable: bool) -> Pattern {
 
 #[cfg(test)]
 mod tests {
-    use acvm::FieldElement;
     use insta::assert_snapshot;
+    use num_bigint::BigUint;
 
     use crate::{
         ast::{ExpressionKind, ItemVisibility, LetStatement, Literal, Pattern},
@@ -182,6 +182,6 @@ mod tests {
         };
 
         assert!(value.is_negative());
-        assert_eq!(value.absolute_value(), FieldElement::from(17u128));
+        assert_eq!(value.absolute_value(), BigUint::from(17u128));
     }
 }

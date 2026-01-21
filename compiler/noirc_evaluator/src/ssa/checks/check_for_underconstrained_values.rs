@@ -11,6 +11,7 @@ use crate::ssa::visit_once_deque::VisitOnceDeque;
 use im::HashMap;
 use noirc_artifacts::ssa::{InternalBug, SsaReport};
 use noirc_errors::Location;
+use num_traits::ToPrimitive;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use tracing::trace;
@@ -648,7 +649,7 @@ impl DependencyContext {
 
         // Only allow numeric constant indices
         if let Some(value) = function.dfg.get_numeric_constant(index) {
-            if let Some(index) = value.try_to_u32() {
+            if let Some(index) = value.to_u32() {
                 // Skip untracked calls
                 for call in &self.tracking {
                     if let Some(tainted_ids) = self.tainted.get_mut(call) {

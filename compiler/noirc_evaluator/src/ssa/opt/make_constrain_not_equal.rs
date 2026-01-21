@@ -28,6 +28,7 @@
 //! - this pass must be placed after [`CFG flattening`](super::flatten_cfg)
 //!   as the flattening pass cannot handle this instruction.
 use acvm::AcirField;
+use num_traits::Zero;
 
 use crate::ssa::{
     ir::{

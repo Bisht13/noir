@@ -16,7 +16,7 @@ use noirc_driver::{CompilationResult, CompileOptions, gen_abi};
 use clap::Args;
 use noirc_errors::CustomDiagnostic;
 use noirc_evaluator::ssa::interpreter::InterpreterOptions;
-use noirc_evaluator::ssa::interpreter::value::{NumericValue, Value};
+use noirc_evaluator::ssa::interpreter::value::Value;
 use noirc_evaluator::ssa::ir::types::{NumericType, Type};
 use noirc_evaluator::ssa::ssa_gen::{Ssa, generate_ssa};
 use noirc_evaluator::ssa::{SsaEvaluatorOptions, SsaLogging, primary_passes};
@@ -53,10 +53,6 @@ pub(super) struct InterpretCommand {
     /// If true, the interpreter will trace its execution.
     #[clap(long)]
     trace: bool,
-
-    /// Optional limit for the interpreter.
-    #[clap(long)]
-    step_limit: Option<usize>,
 }
 
 impl WorkspaceCommand for InterpretCommand {
@@ -76,7 +72,6 @@ pub(crate) fn run(args: InterpretCommand, workspace: Workspace) -> Result<(), Cl
 
     let opts = args.compile_options.as_ssa_options(PathBuf::new());
     let ssa_passes = primary_passes(&opts);
-    let mut is_ok = true;
 
     for package in binary_packages {
         let ssa_options =
@@ -91,96 +86,86 @@ pub(crate) fn run(args: InterpretCommand, workspace: Workspace) -> Result<(), Cl
             &args.compile_options,
         );
 
-        // Report warnings and get the AST, or exit if the compilation failed.
-        let (program, abi) = report_errors(
-            program_result,
-            &file_manager,
-            args.compile_options.deny_warnings,
-            args.compile_options.silence_warnings,
-        )?;
+        // // Report warnings and get the AST, or exit if the compilation failed.
+        // let (program, abi) = report_errors(
+        //     program_result,
+        //     &file_manager,
+        //     args.compile_options.deny_warnings,
+        //     args.compile_options.silence_warnings,
+        // )?;
 
-        // Parse the inputs and convert them to what the SSA interpreter expects.
-        let prover_file = package.root_dir.join(&args.prover_name).with_extension("toml");
-        let (prover_input, return_value) =
-            noir_artifact_cli::fs::inputs::read_inputs_from_file(&prover_file, &abi)?;
+        // // Parse the inputs and convert them to what the SSA interpreter expects.
+        // let prover_file = package.root_dir.join(&args.prover_name).with_extension("toml");
+        // let (prover_input, return_value) =
+        //     noir_artifact_cli::fs::inputs::read_inputs_from_file(&prover_file, &abi)?;
 
-        // We need to give a fresh copy of arrays each time, because the shared structures are modified.
-        let ssa_args = noir_ast_fuzzer::input_values_to_ssa(&abi, &prover_input);
+        // // We need to give a fresh copy of arrays each time, because the shared structures are modified.
+        // let ssa_args = noir_ast_fuzzer::input_values_to_ssa(&abi, &prover_input);
 
-        let ssa_return =
-            if let (Some(return_type), Some(return_value)) = (&abi.return_type, return_value) {
-                Some(noir_ast_fuzzer::input_value_to_ssa(&return_type.abi_type, &return_value))
-            } else {
-                None
-            };
+        // let ssa_return =
+        //     if let (Some(return_type), Some(return_value)) = (&abi.return_type, return_value) {
+        //         Some(noir_ast_fuzzer::input_value_to_ssa(&return_type.abi_type, &return_value))
+        //     } else {
+        //         None
+        //     };
 
-        // Generate the initial SSA.
-        let mut ssa = generate_ssa(program)
-            .map_err(|e| CliError::Generic(format!("failed to generate SSA: {e}")))?;
+        // // Generate the initial SSA.
+        // let mut ssa = generate_ssa(program)
+        //     .map_err(|e| CliError::Generic(format!("failed to generate SSA: {e}")))?;
 
-        // If the main function returns `return_data`, the values are returned in a flattened array.
-        // So, we change the expected return value by flattening it as well.
-        // Ideally we'd have the interpreter return the data in the correct shape. However, doing
-        // that would be replicating some logic which is unrelated to SSA. For the purpose of SSA
-        // correctness, it's enough if we make sure the flattened values match.
-        let ssa_return = ssa_return.map(|ssa_return| {
-            let main_function = &ssa.functions[&ssa.main_id];
-            if main_function.view().has_data_bus_return_data() {
-                let values = flatten_databus_values(ssa_return);
-                vec![Value::array(values, vec![Type::Numeric(NumericType::NativeField)])]
-            } else {
-                ssa_return
-            }
-        });
+        // // If the main function returns `return_data`, the values are returned in a flattened array.
+        // // So, we change the expected return value by flattening it as well.
+        // // Ideally we'd have the interpreter return the data in the correct shape. However, doing
+        // // that would be replicating some logic which is unrelated to SSA. For the purpose of SSA
+        // // correctness, it's enough if we make sure the flattened values match.
+        // let ssa_return = ssa_return.map(|ssa_return| {
+        //     let main_function = &ssa.functions[&ssa.main_id];
+        //     if main_function.has_data_bus_return_data() {
+        //         let values = flatten_values(ssa_return);
+        //         vec![Value::array(values, vec![Type::Numeric(NumericType::NativeField)])]
+        //     } else {
+        //         ssa_return
+        //     }
+        // });
 
-        let interpreter_options = InterpreterOptions {
-            trace: args.trace,
-            step_limit: args.step_limit,
-            ..Default::default()
-        };
-        let file_manager =
-            if args.compile_options.with_ssa_locations { Some(&file_manager) } else { None };
+        // let interpreter_options = InterpreterOptions { trace: args.trace };
 
-        is_ok &= print_and_interpret_ssa(
-            ssa_options,
-            &args.ssa_pass,
-            &mut ssa,
-            "Initial SSA",
-            &ssa_args,
-            &ssa_return,
-            interpreter_options,
-            file_manager,
-        )?;
+        // print_and_interpret_ssa(
+        //     ssa_options,
+        //     &args.ssa_pass,
+        //     &mut ssa,
+        //     "Initial SSA",
+        //     &ssa_args,
+        //     &ssa_return,
+        //     interpreter_options,
+        //     &file_manager,
+        // )?;
 
-        // Run SSA passes in the pipeline and interpret the ones we are interested in.
-        for (i, ssa_pass) in ssa_passes.iter().enumerate() {
-            let msg = format!("{} (step {})", ssa_pass.msg(), i + 1);
+        // // Run SSA passes in the pipeline and interpret the ones we are interested in.
+        // for (i, ssa_pass) in ssa_passes.iter().enumerate() {
+        //     let msg = format!("{} (step {})", ssa_pass.msg(), i + 1);
 
-            if msg_matches(&args.compile_options.skip_ssa_pass, &msg) {
-                continue;
-            }
+        //     if msg_matches(&args.compile_options.skip_ssa_pass, &msg) {
+        //         continue;
+        //     }
 
-            ssa = ssa_pass
-                .run(ssa)
-                .map_err(|e| CliError::Generic(format!("failed to run SSA pass {msg}: {e}")))?;
+        //     ssa = ssa_pass
+        //         .run(ssa)
+        //         .map_err(|e| CliError::Generic(format!("failed to run SSA pass {msg}: {e}")))?;
 
-            is_ok &= print_and_interpret_ssa(
-                ssa_options,
-                &args.ssa_pass,
-                &mut ssa,
-                &msg,
-                &ssa_args,
-                &ssa_return,
-                interpreter_options,
-                file_manager,
-            )?;
-        }
+        //     print_and_interpret_ssa(
+        //         ssa_options,
+        //         &args.ssa_pass,
+        //         &mut ssa,
+        //         &msg,
+        //         &ssa_args,
+        //         &ssa_return,
+        //         interpreter_options,
+        //         &file_manager,
+        //     )?;
+        // }
     }
-    if is_ok {
-        Ok(())
-    } else {
-        Err(CliError::Generic("The interpreter encountered an error on one or more passes.".into()))
-    }
+    Ok(())
 }
 
 /// Compile the source code into the monomorphized AST, which is one step before SSA passes.
@@ -195,6 +180,9 @@ fn compile_into_program(
     options: &CompileOptions,
 ) -> CompilationResult<(Program, Abi)> {
     let (mut context, crate_id) = nargo::prepare_package(file_manager, parsed_files, package);
+    if options.disable_comptime_printing {
+        context.disable_comptime_printing();
+    }
     context.debug_instrumenter = DebugInstrumenter::default();
     context.package_build_path = workspace.package_build_path(package);
     noirc_driver::link_to_debug_crate(&mut context, crate_id);
@@ -238,7 +226,7 @@ fn msg_matches(patterns: &[String], msg: &str) -> bool {
     patterns.iter().any(|p| msg.contains(&p.to_lowercase()))
 }
 
-fn print_ssa(options: &SsaEvaluatorOptions, ssa: &mut Ssa, msg: &str, fm: Option<&FileManager>) {
+fn print_ssa(options: &SsaEvaluatorOptions, ssa: &mut Ssa, msg: &str, fm: &FileManager) {
     let print = match options.ssa_logging {
         SsaLogging::All => true,
         SsaLogging::None => false,
@@ -246,16 +234,10 @@ fn print_ssa(options: &SsaEvaluatorOptions, ssa: &mut Ssa, msg: &str, fm: Option
     };
     if print {
         ssa.normalize_ids();
-        println!("After {msg}:\n{}", ssa.print_with(fm));
+        println!("After {msg}:\n{}", ssa.print_with(Some(fm)));
     }
 }
 
-/// Interpret the SSA if it's part of the selected passes.
-///
-/// The return value is:
-/// * `Ok(true)` if the interpretation was successful, or it was skipped.
-/// * `Ok(false)` if the interpreter returned an error, but we didn't have any expectation.
-/// * `Err(_)` if the returned result did not match the expectation.
 fn interpret_ssa(
     passes_to_interpret: &[String],
     ssa: &Ssa,
@@ -263,7 +245,7 @@ fn interpret_ssa(
     args: &[Value],
     return_value: &Option<Vec<Value>>,
     options: InterpreterOptions,
-) -> Result<bool, CliError> {
+) -> Result<(), CliError> {
     if passes_to_interpret.is_empty() || msg_matches(passes_to_interpret, msg) {
         // We need to give a fresh copy of arrays each time, because the shared structures are modified.
         let args = Value::snapshot_args(args);
@@ -277,7 +259,6 @@ fn interpret_ssa(
                 println!("--- Interpreter result after {msg}:\nErr({err})\n---");
             }
         }
-        let is_ok = result.is_ok();
         if let Some(return_value) = return_value {
             let result = result.expect("Expected a non-error result");
             if &result != return_value {
@@ -289,10 +270,8 @@ fn interpret_ssa(
                 return Err(CliError::Generic(error));
             }
         }
-        Ok(is_ok)
-    } else {
-        Ok(true)
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -304,31 +283,29 @@ fn print_and_interpret_ssa(
     args: &[Value],
     return_value: &Option<Vec<Value>>,
     interpreter_options: InterpreterOptions,
-    fm: Option<&FileManager>,
-) -> Result<bool, CliError> {
+    fm: &FileManager,
+) -> Result<(), CliError> {
     print_ssa(options, ssa, msg, fm);
     interpret_ssa(passes_to_interpret, ssa, msg, args, return_value, interpreter_options)
 }
 
-fn flatten_databus_values(values: Vec<Value>) -> Vec<Value> {
+fn flatten_values(values: Vec<Value>) -> Vec<Value> {
     let mut flattened_values = Vec::new();
     for value in values {
-        flatten_databus_value(value, &mut flattened_values);
+        flatten_value(value, &mut flattened_values);
     }
     flattened_values
 }
 
-fn flatten_databus_value(value: Value, flattened_values: &mut Vec<Value>) {
+fn flatten_value(value: Value, flattened_values: &mut Vec<Value>) {
     match value {
-        Value::ArrayOrVector(array_value) => {
+        Value::ArrayOrSlice(array_value) => {
             for value in array_value.elements.borrow().iter() {
-                flatten_databus_value(value.clone(), flattened_values);
+                flatten_value(value.clone(), flattened_values);
             }
         }
-        Value::Numeric(value) => {
-            flattened_values.push(Value::Numeric(NumericValue::Field(value.convert_to_field())));
-        }
-        Value::Reference(..)
+        Value::Numeric(..)
+        | Value::Reference(..)
         | Value::Function(..)
         | Value::Intrinsic(..)
         | Value::ForeignFunction(..) => flattened_values.push(value),

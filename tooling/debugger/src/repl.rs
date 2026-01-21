@@ -3,12 +3,12 @@ use crate::context::{
     DebugCommandResult, DebugContext, DebugExecutionResult, DebugLocation, DebugStackFrame,
     RunParams,
 };
+use noirc_driver::CompiledProgram;
 
 use crate::foreign_calls::DefaultDebugForeignCallExecutor;
 use noirc_artifacts::debug::DebugArtifact;
 
 use easy_repl::{CommandStatus, Repl, command};
-use noirc_artifacts::program::CompiledProgram;
 use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -26,14 +26,14 @@ use acvm::{
     },
     brillig_vm::MemoryValue,
 };
-use bn254_blackbox_solver::Bn254BlackBoxSolver;
+use m31_blackbox_solver::M31BlackBoxSolver;
 use noirc_printable_type::PrintableValueDisplay;
 
 use crate::{
     foreign_calls::DebugForeignCallExecutor, source_code_printer::print_source_code_location,
 };
 
-type Context<'a> = DebugContext<'a, Bn254BlackBoxSolver>;
+type Context<'a> = DebugContext<'a, M31BlackBoxSolver>;
 
 #[derive(Debug, Clone)]
 pub(super) enum DebugCommandAPI {
@@ -74,7 +74,7 @@ pub struct AsyncReplDebugger<'a> {
     command_receiver: Receiver<DebugCommandAPI>,
     status_sender: Sender<DebuggerStatus>,
     last_result: DebugCommandResult,
-
+    pedantic_solving: bool,
     raw_source_printing: bool,
 }
 
@@ -86,6 +86,7 @@ impl<'a> AsyncReplDebugger<'a> {
         status_sender: Sender<DebuggerStatus>,
         command_receiver: Receiver<DebugCommandAPI>,
         raw_source_printing: bool,
+        pedantic_solving: bool,
     ) -> Self {
         let last_result = DebugCommandResult::Ok;
 
@@ -98,6 +99,7 @@ impl<'a> AsyncReplDebugger<'a> {
             unconstrained_functions: compiled_program.program.unconstrained_functions.clone(),
             raw_source_printing,
             initial_witness,
+            pedantic_solving,
         }
     }
 
@@ -109,7 +111,7 @@ impl<'a> AsyncReplDebugger<'a> {
         mut self,
         foreign_call_executor: Box<dyn DebugForeignCallExecutor + 'a>,
     ) {
-        let blackbox_solver = &Bn254BlackBoxSolver;
+        let blackbox_solver = &M31BlackBoxSolver(self.pedantic_solving);
         let circuits = &self.circuits.clone();
         let unconstrained_functions = &self.unconstrained_functions.clone();
         let mut context = DebugContext::new(
@@ -355,13 +357,14 @@ impl<'a> AsyncReplDebugger<'a> {
             match &opcode {
                 Opcode::BrilligCall { id, inputs, outputs, .. } => {
                     println!(
-                        "{circuit_id:>2}:{acir_index:>3} {marker:2} BRILLIG CALL id={id} inputs={inputs:?}"
+                        "{:>2}:{:>3} {:2} BRILLIG CALL id={} inputs={:?}",
+                        circuit_id, acir_index, marker, id, inputs
                     );
-                    println!("          |       outputs={outputs:?}");
+                    println!("          |       outputs={:?}", outputs);
                     let bytecode = &self.unconstrained_functions[id.as_usize()].bytecode;
                     print_brillig_bytecode(acir_index, bytecode, *id);
                 }
-                _ => println!("{circuit_id:>2}:{acir_index:>3} {marker:2} {opcode:?}"),
+                _ => println!("{:>2}:{:>3} {:2} {:?}", circuit_id, acir_index, marker, opcode),
             }
         }
     }
@@ -380,10 +383,10 @@ impl<'a> AsyncReplDebugger<'a> {
         let best_location = context.find_opcode_at_current_file_line(line_number);
         match best_location {
             Some(location) => {
-                println!("Added breakpoint at line {line_number}");
+                println!("Added breakpoint at line {}", line_number);
                 Self::add_breakpoint_at(context, location);
             }
-            None => println!("No opcode at line {line_number}"),
+            None => println!("No opcode at line {}", line_number),
         }
     }
 
@@ -403,10 +406,10 @@ impl<'a> AsyncReplDebugger<'a> {
             }
             DebugCommandResult::Ok => (),
             DebugCommandResult::BreakpointReached(location) => {
-                println!("Stopped at breakpoint in opcode {location}");
+                println!("Stopped at breakpoint in opcode {}", location);
             }
             DebugCommandResult::Error(error) => {
-                println!("ERROR: {error}");
+                println!("ERROR: {}", error);
             }
         }
     }
@@ -422,7 +425,7 @@ impl<'a> AsyncReplDebugger<'a> {
                 false
             }
             DebugCommandResult::Error(ref error) => {
-                println!("ERROR: {error}");
+                println!("ERROR: {}", error);
                 self.show_current_vm_status(context);
                 false
             }
@@ -451,7 +454,7 @@ impl<'a> AsyncReplDebugger<'a> {
 
     fn show_witness(context: &mut Context<'_>, index: u32) {
         if let Some(value) = context.get_witness_map().get_index(index) {
-            println!("_{index} = {value}");
+            println!("_{} = {value}", index);
         }
     }
 
@@ -463,7 +466,7 @@ impl<'a> AsyncReplDebugger<'a> {
 
         let witness = Witness::from(index);
         _ = context.overwrite_witness(witness, field_value);
-        println!("_{index} = {value}");
+        println!("_{} = {value}", index);
     }
 
     fn show_brillig_memory(context: &mut Context<'_>) {
@@ -487,7 +490,7 @@ impl<'a> AsyncReplDebugger<'a> {
                     continue;
                 }
             }
-            println!("{index} = {value}");
+            println!("{index} = {}", value);
         }
     }
     fn write_brillig_memory(context: &mut Context<'_>, index: usize, value: String, bit_size: u32) {
@@ -516,7 +519,7 @@ impl<'a> AsyncReplDebugger<'a> {
             for (var_name, value, var_type) in frame.variables.iter() {
                 let printable_value =
                     PrintableValueDisplay::Plain((*value).clone(), (*var_type).clone());
-                println!("  {var_name}:{var_type:?} = {printable_value}");
+                println!("  {var_name}:{var_type:?} = {}", printable_value);
             }
         }
     }
@@ -658,6 +661,7 @@ pub fn run(project: DebugProject, run_params: RunParams) -> DebugExecutionResult
             status_tx,
             command_rx,
             run_params.raw_source_printing.unwrap_or(false),
+            run_params.pedantic_solving,
         );
         debugger.start_debugging(foreign_call_executor);
     });

@@ -25,6 +25,7 @@ indexmap.workspace = true
 
 [features]
 bn254 = ["acir/bn254", "brillig_vm/bn254", "acvm_blackbox_solver/bn254"]
+m31 = ["acir/m31", "brillig_vm/m31", "acvm_blackbox_solver/m31"]
 bls12_381 = [
     "acir/bls12_381",
     "brillig_vm/bls12_381",
@@ -38,6 +39,7 @@ ark-bls12-381 = { version = "^0.5.0", default-features = false, features = [
 ark-ff.workspace = true
 ark-bn254.workspace = true
 bn254_blackbox_solver.workspace = true
+m31_blackbox_solver.workspace = true
 insta.workspace = true
 proptest.workspace = true
 num-bigint.workspace = true

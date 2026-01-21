@@ -1,5 +1,7 @@
-use bn254_blackbox_solver::Bn254BlackBoxSolver;
+use acvm::acir::circuit::ExpressionWidth;
+use m31_blackbox_solver::M31BlackBoxSolver;
 use clap::Args;
+use iter_extended::vecmap;
 use nargo::{
     constants::PROVER_INPUT_FILE, foreign_calls::DefaultForeignCallBuilder, package::Package,
     workspace::Workspace,
@@ -11,11 +13,16 @@ use noirc_artifacts_info::{
     FunctionInfo, InfoReport, ProgramInfo, count_opcodes_and_gates_in_program, show_info_report,
 };
 use noirc_driver::CompileOptions;
+use prettytable::{Row, row};
 use rayon::prelude::*;
+use serde::Serialize;
 
 use crate::errors::CliError;
 
-use super::{LockType, PackageOptions, WorkspaceCommand, compile_cmd::compile_workspace_full};
+use super::{
+    LockType, PackageOptions, WorkspaceCommand,
+    compile_cmd::{compile_workspace_full, get_target_width},
+};
 
 /// Provides detailed information on each of a program's function (represented by a single circuit)
 ///
@@ -54,11 +61,6 @@ impl WorkspaceCommand for InfoCommand {
 }
 
 pub(crate) fn run(mut args: InfoCommand, workspace: Workspace) -> Result<(), CliError> {
-    if args.json {
-        // In order to have a machine readable output, we cannot allow the program to print arbitrary data to stdout.
-        args.compile_options.disable_comptime_printing = true;
-    }
-
     if args.profile_execution {
         // Execution profiling is only relevant with the Brillig VM
         // as a constrained circuit should have totally flattened control flow (e.g. loops and if statements).
@@ -83,14 +85,23 @@ pub(crate) fn run(mut args: InfoCommand, workspace: Workspace) -> Result<(), Cli
             args.compile_options.force_brillig,
             "Internal CLI Error: --force-brillig must be active when --profile-execution is active"
         );
-        profile_brillig_execution(binary_packages, &args.prover_name)?
+        profile_brillig_execution(
+            binary_packages,
+            &args.prover_name,
+            args.compile_options.expression_width,
+            args.compile_options.pedantic_solving,
+        )?
     } else {
         binary_packages
             .into_iter()
             .par_bridge()
             .map(|(package, program)| {
+                let target_width = get_target_width(
+                    package.expression_width,
+                    args.compile_options.expression_width,
+                );
                 let package_name = package.name.to_string();
-                count_opcodes_and_gates_in_program(program, package_name)
+                count_opcodes_and_gates_in_program(program, package_name, Some(target_width))
             })
             .collect()
     };
@@ -101,9 +112,33 @@ pub(crate) fn run(mut args: InfoCommand, workspace: Workspace) -> Result<(), Cli
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct ContractInfo {
+    name: String,
+    #[serde(skip)]
+    expression_width: ExpressionWidth,
+    // TODO(https://github.com/noir-lang/noir/issues/4720): Settle on how to display contract functions with non-inlined Acir calls
+    functions: Vec<FunctionInfo>,
+}
+
+impl From<ContractInfo> for Vec<Row> {
+    fn from(contract_info: ContractInfo) -> Self {
+        vecmap(contract_info.functions, |function| {
+            row![
+                Fm->format!("{}", contract_info.name),
+                Fc->format!("{}", function.name),
+                format!("{:?}", contract_info.expression_width),
+                Fc->format!("{}", function.opcodes),
+            ]
+        })
+    }
+}
+
 fn profile_brillig_execution(
     binary_packages: Vec<(Package, ProgramArtifact)>,
     prover_name: &str,
+    expression_width: Option<ExpressionWidth>,
+    pedantic_solving: bool,
 ) -> Result<Vec<ProgramInfo>, CliError> {
     let mut program_info = Vec::new();
     for (package, program_artifact) in binary_packages.iter() {
@@ -117,7 +152,7 @@ fn profile_brillig_execution(
         let (_, profiling_samples) = nargo::ops::execute_program_with_profiling(
             &program_artifact.bytecode,
             initial_witness,
-            &Bn254BlackBoxSolver,
+            &M31BlackBoxSolver(pedantic_solving),
             &mut DefaultForeignCallBuilder::default().build(),
         )
         .map_err(|e| {
@@ -128,8 +163,11 @@ fn profile_brillig_execution(
             ))
         })?;
 
+        let expression_width = get_target_width(package.expression_width, expression_width);
+
         program_info.push(ProgramInfo {
             package_name: package.name.to_string(),
+            expression_width: Some(expression_width),
             functions: vec![FunctionInfo { name: "main".to_string(), opcodes: 0 }],
             unconstrained_functions_opcodes: profiling_samples.len(),
             unconstrained_functions: vec![FunctionInfo {

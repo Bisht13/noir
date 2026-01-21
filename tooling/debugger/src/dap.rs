@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
 use acvm::{BlackBoxFunctionSolver, FieldElement};
-use bn254_blackbox_solver::Bn254BlackBoxSolver;
+use m31_blackbox_solver::M31BlackBoxSolver;
 use nargo::NargoError;
 
 use crate::DebugProject;
@@ -495,7 +495,7 @@ impl<'a, R: Read, W: Write, B: BlackBoxFunctionSolver<FieldElement>> DapSession<
                     };
                 }
                 let breakpoint_address = self.context.debug_location_to_address(&location);
-                let instruction_reference = format!("{breakpoint_address}");
+                let instruction_reference = format!("{}", breakpoint_address);
                 let breakpoint_id = self.get_next_breakpoint_id();
                 breakpoints_to_set.push((location, breakpoint_id));
                 Breakpoint {
@@ -570,7 +570,7 @@ impl<'a, R: Read, W: Write, B: BlackBoxFunctionSolver<FieldElement>> DapSession<
             .clone()
             .into_iter()
             .map(|(witness, value)| Variable {
-                name: witness.to_string(),
+                name: format!("_{}", witness.witness_index()),
                 value: format!("{value:?}"),
                 ..Variable::default()
             })
@@ -616,7 +616,7 @@ pub fn run_session<R: Read, W: Write>(
         file_map: project.compiled_program.file_map.clone(),
     };
 
-    let solver = Bn254BlackBoxSolver;
+    let solver = M31BlackBoxSolver(run_params.pedantic_solving);
     let mut session =
         DapSession::new(server, &solver, &project, &debug_artifact, run_params.oracle_resolver_url);
 

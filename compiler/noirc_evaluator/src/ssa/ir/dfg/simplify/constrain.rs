@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 
 use acvm::{FieldElement, acir::AcirField};
+use num_bigint::BigInt;
+use num_traits::{One, Zero};
 
 use crate::ssa::ir::{
     dfg::DataFlowGraph,
@@ -73,7 +75,7 @@ pub(super) fn decompose_constrain(
                         //
                         // Note that this doesn't remove the value `v2` as it may be used in other instructions, but it
                         // will likely be removed through dead instruction elimination.
-                        let one = FieldElement::one();
+                        let one = BigInt::one();
                         let one = dfg.make_constant(one, NumericType::bool());
 
                         constrains.push_back((lhs, one));
@@ -98,7 +100,7 @@ pub(super) fn decompose_constrain(
                         //
                         // Note that this doesn't remove the value `v2` as it may be used in other instructions, but it
                         // will likely be removed through dead instruction elimination.
-                        let zero = FieldElement::zero();
+                        let zero = BigInt::zero();
                         let zero = dfg.make_constant(zero, dfg.type_of_value(lhs).unwrap_numeric());
 
                         constrains.push_back((lhs, zero));
@@ -118,7 +120,7 @@ pub(super) fn decompose_constrain(
                         //
                         // Note that this doesn't remove the value `v1` as it may be used in other instructions, but it
                         // will likely be removed through dead instruction elimination.
-                        let reversed_constant = FieldElement::from(!constant.is_one());
+                        let reversed_constant = BigInt::from(!constant.is_one());
                         let reversed_constant =
                             dfg.make_constant(reversed_constant, NumericType::bool());
 
@@ -155,7 +157,7 @@ pub(super) fn decompose_constrain(
                         // This is safe for all numeric types as the underlying field has a prime modulus so squaring
                         // a non-zero value should never result in zero.
 
-                        let zero = FieldElement::zero();
+                        let zero = BigInt::zero();
                         let zero = dfg.make_constant(zero, dfg.type_of_value(lhs).unwrap_numeric());
                         constrains.push_back((lhs, zero));
                     }

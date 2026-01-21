@@ -62,7 +62,7 @@ impl<'f> Validator<'f> {
     /// 2. A constant value known to be in-range
     /// 3. A division or other operation whose result is known to fit within the target bit size
     ///
-    /// Our initial SSA gen only generates preceding truncates for safe casts.
+    /// Our initial SSA gen only generates preceding truncates for safe casts. - px: now adds range checks as well
     /// The cases accepted here are extended past what we perform during our initial SSA gen
     /// to mirror the instruction simplifier and other logic that could be accepted as a safe cast.
     fn validate_field_to_integer_cast_invariant(&mut self, instruction_id: InstructionId) {
@@ -105,7 +105,7 @@ impl<'f> Validator<'f> {
                 {
                     let numerator_bits = dfg.type_of_value(*lhs).bit_size();
                     let divisor = dfg.get_numeric_constant(*rhs).unwrap();
-                    let divisor_bits = divisor.num_bits();
+                    let divisor_bits = divisor.bits() as u32;
                     let max_quotient_bits = numerator_bits - divisor_bits;
 
                     assert!(
@@ -118,7 +118,7 @@ impl<'f> Validator<'f> {
                 }
             },
             Value::NumericConstant { constant, .. } => {
-                let max_val_bits = constant.num_bits();
+                let max_val_bits = constant.bits() as u32;
                 assert!(
                     max_val_bits <= target_type_size,
                     "Constant too large for cast target: {max_val_bits} bits > {target_type_size}"

@@ -1,14 +1,15 @@
-use acvm::acir::brillig::lengths::{ElementTypesLength, SemanticLength, SemiFlattenedLength};
-use noirc_errors::{Location, call_stack::CallStackId};
-use rustc_hash::FxHashMap as HashMap;
+use acvm::{FieldElement, acir::AcirField};
+use fxhash::FxHashMap as HashMap;
+use noirc_errors::call_stack::CallStackId;
+use num_bigint::BigInt;
+use num_traits::Zero;
 
 use crate::{
-    brillig::assert_u32,
     errors::{RtResult, RuntimeError},
     ssa::ir::{
         basic_block::BasicBlockId,
         dfg::DataFlowGraph,
-        instruction::{BinaryOp, Instruction},
+        instruction::{ArrayOffset, BinaryOp, Instruction},
         types::{NumericType, Type},
         value::ValueId,
     },
@@ -18,9 +19,9 @@ pub(crate) struct ValueMerger<'a> {
     dfg: &'a mut DataFlowGraph,
     block: BasicBlockId,
 
-    /// Maps SSA array values with a vector type to their size.
-    /// This must be computed before merging values.
-    vector_sizes: &'a HashMap<ValueId, SemanticLength>,
+    // Maps SSA array values with a slice type to their size.
+    // This must be computed before merging values.
+    slice_sizes: &'a mut HashMap<ValueId, u32>,
 
     call_stack: CallStackId,
 }
@@ -29,29 +30,19 @@ impl<'a> ValueMerger<'a> {
     pub(crate) fn new(
         dfg: &'a mut DataFlowGraph,
         block: BasicBlockId,
-        vector_sizes: &'a HashMap<ValueId, SemanticLength>,
+        slice_sizes: &'a mut HashMap<ValueId, u32>,
         call_stack: CallStackId,
     ) -> Self {
-        ValueMerger { dfg, block, vector_sizes, call_stack }
+        ValueMerger { dfg, block, slice_sizes, call_stack }
     }
 
-    /// Choose a call stack to return with the [RuntimeError].
-    ///
-    /// If the call stack of the value is empty, it returns the call stack of the if-then-else itself.
-    fn get_call_stack(&self, value: ValueId) -> Vec<Location> {
-        // The value points at one of the problematic references, while the instruction would
-        // point at where we got the if-then-else; it's not clear which one is more useful.
-        let call_stack = self.dfg.get_value_call_stack(value);
-        if call_stack.is_empty() { self.dfg.get_call_stack(self.call_stack) } else { call_stack }
-    }
-
-    /// Merge two values a and b to a single value.
+    /// Merge two values a and b from separate basic blocks to a single value.
     /// If these two values are numeric, the result will be
     /// `then_condition * (then_value - else_value) + else_value`.
     /// Otherwise, if the values being merged are arrays, a new array will be made
     /// recursively from combining each element of both input arrays.
     ///
-    /// Returns an error if called with a function value or a reference or function values
+    /// It is currently an error to call this function on reference or function values
     /// as it is less clear how to merge these.
     pub(crate) fn merge_values(
         &mut self,
@@ -76,19 +67,17 @@ impl<'a> ValueMerger<'a> {
             typ @ Type::Array(_, _) => {
                 self.merge_array_values(typ, then_condition, else_condition, then_value, else_value)
             }
-            typ @ Type::Vector(_) => self.merge_vector_values(
-                typ,
-                then_condition,
-                else_condition,
-                then_value,
-                else_value,
-            ),
+            typ @ Type::Slice(_) => {
+                self.merge_slice_values(typ, then_condition, else_condition, then_value, else_value)
+            }
             Type::Reference(_) => {
-                let call_stack = self.get_call_stack(then_value);
+                // FIXME: none of then_value, else_value, then_condition, or else_condition have
+                // non-empty call stacks
+                let call_stack = self.dfg.get_value_call_stack(then_value);
                 Err(RuntimeError::ReturnedReferenceFromDynamicIf { call_stack })
             }
             Type::Function => {
-                let call_stack = self.get_call_stack(then_value);
+                let call_stack = self.dfg.get_value_call_stack(then_value);
                 Err(RuntimeError::ReturnedFunctionFromDynamicIf { call_stack })
             }
         }
@@ -146,7 +135,7 @@ impl<'a> ValueMerger<'a> {
 
     /// Given an if expression that returns an array: `if c { array1 } else { array2 }`,
     /// this function will recursively merge array1 and array2 into a single resulting array
-    /// by creating a new array containing the result of `self.merge_values` for each element.
+    /// by creating a new array containing the result of self.merge_values for each element.
     pub(crate) fn merge_array_values(
         &mut self,
         typ: Type,
@@ -158,21 +147,21 @@ impl<'a> ValueMerger<'a> {
         let mut merged = im::Vector::new();
 
         let (element_types, len) = match &typ {
-            Type::Array(elements, len) => (elements.as_slice(), *len),
+            Type::Array(elements, len) => (elements, *len),
             _ => panic!("Expected array type"),
         };
 
-        let element_count = element_types.len() as u32;
-
-        for i in 0..len.0 {
+        for i in 0..len {
             for (element_index, element_type) in element_types.iter().enumerate() {
-                let index = u128::from(i * element_count + element_index as u32).into();
+                let index =
+                    ((i * element_types.len() as u32 + element_index as u32) as u128).into();
                 let index = self.dfg.make_constant(index, NumericType::length_type());
 
                 let typevars = Some(vec![element_type.clone()]);
 
                 let mut get_element = |array, typevars| {
-                    let get = Instruction::ArrayGet { array, index };
+                    let offset = ArrayOffset::None;
+                    let get = Instruction::ArrayGet { array, index, offset };
                     self.dfg
                         .insert_instruction_and_results(get, self.block, typevars, self.call_stack)
                         .first()
@@ -196,7 +185,7 @@ impl<'a> ValueMerger<'a> {
         Ok(result.first())
     }
 
-    fn merge_vector_values(
+    fn merge_slice_values(
         &mut self,
         typ: Type,
         then_condition: ValueId,
@@ -207,63 +196,57 @@ impl<'a> ValueMerger<'a> {
         let mut merged = im::Vector::new();
 
         let element_types = match &typ {
-            Type::Vector(elements) => elements.as_slice(),
-            _ => panic!("Expected vector type"),
+            Type::Slice(elements) => elements,
+            _ => panic!("Expected slice type"),
         };
 
-        let then_len = self.vector_sizes.get(&then_value_id).copied().unwrap_or_else(|| {
-            panic!("ICE: Merging values during flattening encountered vector {then_value_id} without a preset size");
+        let then_len = self.slice_sizes.get(&then_value_id).copied().unwrap_or_else(|| {
+            let (slice, typ) = self.dfg.get_array_constant(then_value_id).unwrap_or_else(|| {
+                panic!("ICE: Merging values during flattening encountered slice {then_value_id} without a preset size");
+            });
+            (slice.len() / typ.element_types().len()) as u32
         });
 
-        let else_len = self.vector_sizes.get(&else_value_id).copied().unwrap_or_else(|| {
-            panic!("ICE: Merging values during flattening encountered vector {else_value_id} without a preset size");
+        let else_len = self.slice_sizes.get(&else_value_id).copied().unwrap_or_else(|| {
+            let (slice, typ) = self.dfg.get_array_constant(else_value_id).unwrap_or_else(|| {
+                panic!("ICE: Merging values during flattening encountered slice {else_value_id} without a preset size");
+            });
+            (slice.len() / typ.element_types().len()) as u32
         });
 
         let len = then_len.max(else_len);
-        let element_count = ElementTypesLength(assert_u32(element_types.len()));
 
-        let semi_flat_then_length = then_len * element_count;
-        let semi_flat_else_length = else_len * element_count;
-
-        for i in 0..len.0 {
+        for i in 0..len {
             for (element_index, element_type) in element_types.iter().enumerate() {
-                let index_u32 = i * element_count.0 + element_index as u32;
-                let index_value = u128::from(index_u32).into();
+                let index_u32 = i * element_types.len() as u32 + element_index as u32;
+                let index_value = (index_u32 as u128).into();
                 let index = self.dfg.make_constant(index_value, NumericType::length_type());
 
                 let typevars = Some(vec![element_type.clone()]);
 
-                let mut get_element = |array, typevars, len: SemiFlattenedLength| {
-                    assert!(index_u32 < len.0, "get_element invoked with an out of bounds index");
-                    let get = Instruction::ArrayGet { array, index };
-                    let results = self.dfg.insert_instruction_and_results(
-                        get,
-                        self.block,
-                        typevars,
-                        self.call_stack,
-                    );
-                    results.first()
+                let mut get_element = |array, typevars, len| {
+                    // The smaller slice is filled with placeholder data. Codegen for slice accesses must
+                    // include checks against the dynamic slice length so that this placeholder data is not incorrectly accessed.
+                    if len <= index_u32 {
+                        self.make_slice_dummy_data(element_type)
+                    } else {
+                        let offset = ArrayOffset::None;
+                        let get = Instruction::ArrayGet { array, index, offset };
+                        let results = self.dfg.insert_instruction_and_results(
+                            get,
+                            self.block,
+                            typevars,
+                            self.call_stack,
+                        );
+                        results.first()
+                    }
                 };
 
-                // If it's out of bounds for the "then" vector, a value in the "else" *must* exist.
-                // We can use that value directly as accessing it is always checked against the actual
-                // vector length.
-                if index_u32 >= semi_flat_then_length.0 {
-                    let else_element = get_element(else_value_id, typevars, semi_flat_else_length);
-                    merged.push_back(else_element);
-                    continue;
-                }
+                let len = then_len * element_types.len() as u32;
+                let then_element = get_element(then_value_id, typevars.clone(), len);
 
-                // Same for if it's out of bounds for the "else" vector.
-                if index_u32 >= semi_flat_else_length.0 {
-                    let then_element = get_element(then_value_id, typevars, semi_flat_then_length);
-                    merged.push_back(then_element);
-                    continue;
-                }
-
-                let then_element =
-                    get_element(then_value_id, typevars.clone(), semi_flat_then_length);
-                let else_element = get_element(else_value_id, typevars, semi_flat_else_length);
+                let len = else_len * element_types.len() as u32;
+                let else_element = get_element(else_value_id, typevars, len);
 
                 merged.push_back(self.merge_values(
                     then_condition,
@@ -279,5 +262,42 @@ impl<'a> ValueMerger<'a> {
         let result =
             self.dfg.insert_instruction_and_results(instruction, self.block, None, call_stack);
         Ok(result.first())
+    }
+
+    /// Construct a dummy value to be attached to the smaller of two slices being merged.
+    /// We need to make sure we follow the internal element type structure of the slice type
+    /// even for dummy data to ensure that we do not have errors later in the compiler,
+    /// such as with dynamic indexing of non-homogenous slices.
+    fn make_slice_dummy_data(&mut self, typ: &Type) -> ValueId {
+        match typ {
+            Type::Numeric(numeric_type) => {
+                let zero = BigInt::zero();
+                self.dfg.make_constant(zero, *numeric_type)
+            }
+            Type::Array(element_types, len) => {
+                let mut array = im::Vector::new();
+                for _ in 0..*len {
+                    for typ in element_types.iter() {
+                        array.push_back(self.make_slice_dummy_data(typ));
+                    }
+                }
+                let instruction = Instruction::MakeArray { elements: array, typ: typ.clone() };
+                let call_stack = self.call_stack;
+                self.dfg
+                    .insert_instruction_and_results(instruction, self.block, None, call_stack)
+                    .first()
+            }
+            Type::Slice(_) => {
+                // TODO(#3188): Need to update flattening to use true user facing length of slices
+                // to accurately construct dummy data
+                unreachable!("ICE: Cannot return a slice of slices from an if expression")
+            }
+            Type::Reference(_) => {
+                unreachable!("ICE: Merging references is unsupported")
+            }
+            Type::Function => {
+                unreachable!("ICE: Merging functions is unsupported")
+            }
+        }
     }
 }

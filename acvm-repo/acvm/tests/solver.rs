@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use acir::acir_field::GenericFieldElement;
 use acir::brillig::{BitSize, HeapVector, IntegerBitSize};
@@ -15,8 +16,10 @@ use acir::{
 use acir::{InvalidInputBitSize, parse_opcodes};
 
 use acvm::pwg::{ACVM, ACVMStatus, ErrorLocation, ForeignCallWaitInfo, OpcodeResolutionError};
-use acvm_blackbox_solver::StubbedBlackBoxSolver;
+use acvm_blackbox_solver::{BigIntSolver, StubbedBlackBoxSolver};
 use bn254_blackbox_solver::Bn254BlackBoxSolver;
+use m31_blackbox_solver::M31BlackBoxSolver;
+use bn254_blackbox_solver::{POSEIDON2_CONFIG, field_from_hex};
 use brillig_vm::brillig::HeapValueType;
 
 use num_bigint::BigUint;
@@ -723,7 +726,7 @@ where
         (Vec<FunctionInput<FieldElement>>, Vec<Witness>),
     ) -> Result<BlackBoxFuncCall<FieldElement>, OpcodeResolutionError<FieldElement>>,
 {
-    let solver = Bn254BlackBoxSolver;
+let solver = Bn254BlackBoxSolver;
     let initial_witness_vec: Vec<_> =
         inputs.iter().enumerate().map(|(i, (x, _))| (Witness(i as u32), *x)).collect();
     let outputs: Vec<_> = (0..num_outputs)
@@ -858,6 +861,129 @@ fn sha256_compression_op(
 //     fields.into_iter().map(|field| into_repr_vec(field)).collect()
 // }
 
+fn into_old_ark_field<T, U>(field: T) -> U
+where
+    T: AcirField,
+    U: ark_ff_v04::PrimeField,
+{
+    U::from_be_bytes_mod_order(&field.to_be_bytes())
+}
+
+fn into_new_ark_field<T, U>(field: T) -> U
+where
+    T: ark_ff_v04::PrimeField,
+    U: ark_ff::PrimeField,
+{
+    use zkhash::ark_ff::BigInteger;
+
+    U::from_be_bytes_mod_order(&field.into_bigint().to_bytes_be())
+}
+
+// fn run_both_poseidon2_permutations(
+//     inputs: Vec<ConstantOrWitness>,
+// ) -> Result<(Vec<ark_bn254::Fr>, Vec<ark_bn254::Fr>), OpcodeResolutionError<FieldElement>> {
+//     let pedantic_solving = true;
+//     let result = solve_array_input_blackbox_call(
+//         inputs.clone(),
+//         inputs.len(),
+//         None,
+//         pedantic_solving,
+//         poseidon2_permutation_op,
+//     )?;
+
+//     let poseidon2_t = POSEIDON2_CONFIG.t as usize;
+//     let poseidon2_d = 5;
+//     let rounds_f = POSEIDON2_CONFIG.rounds_f as usize;
+//     let rounds_p = POSEIDON2_CONFIG.rounds_p as usize;
+//     let mat_internal_diag_m_1: Vec<ark_bn254_v04::Fr> =
+//         POSEIDON2_CONFIG.internal_matrix_diagonal.into_iter().map(into_old_ark_field).collect();
+//     let mat_internal = vec![];
+//     let round_constants: Vec<Vec<ark_bn254_v04::Fr>> = POSEIDON2_CONFIG
+//         .round_constant
+//         .into_iter()
+//         .map(|fields| fields.into_iter().map(into_old_ark_field).collect())
+//         .collect();
+
+//     let external_poseidon2 = zkhash::poseidon2::poseidon2::Poseidon2::new(&Arc::new(
+//         zkhash::poseidon2::poseidon2_params::Poseidon2Params::new(
+//             poseidon2_t,
+//             poseidon2_d,
+//             rounds_f,
+//             rounds_p,
+//             &mat_internal_diag_m_1,
+//             &mat_internal,
+//             &round_constants,
+//         ),
+//     ));
+
+//     let expected_result = external_poseidon2.permutation(
+//         &drop_use_constant(&inputs)
+//             .into_iter()
+//             .map(into_old_ark_field)
+//             .collect::<Vec<ark_bn254_v04::Fr>>(),
+//     );
+//     Ok((into_repr_vec(result), expected_result.into_iter().map(into_new_ark_field).collect()))
+// }
+
+// Using the given BigInt modulus, solve the following circuit:
+// - Convert xs, ys to BigInt's with ID's 0, 1, resp.
+// - Run the middle_op:
+//   + Input BigInt ID's: 0, 1
+//   + Output BigInt ID: 2
+// - Run BigIntToLeBytes on the output BigInt ID
+// - Output the resulting Vec of LE bytes
+fn bigint_solve_binary_op(
+    middle_op: BlackBoxFuncCall<FieldElement>,
+    modulus: Vec<u8>,
+    lhs: Vec<ConstantOrWitness>,
+    rhs: Vec<ConstantOrWitness>,
+    pedantic_solving: bool,
+) -> Vec<FieldElement> {
+    bigint_solve_binary_op_opt(Some(middle_op), modulus, lhs, rhs, pedantic_solving).unwrap()
+}
+
+// Using the given BigInt modulus, solve the following circuit:
+// - Convert the input to a BigInt with ID 0
+// - Run BigIntToLeBytes on BigInt ID 0
+// - Output the resulting Vec of LE bytes
+fn bigint_solve_from_to_le_bytes(
+    modulus: Vec<u8>,
+    inputs: Vec<ConstantOrWitness>,
+    pedantic_solving: bool,
+) -> Vec<FieldElement> {
+    bigint_solve_binary_op_opt(None, modulus, inputs, vec![], pedantic_solving).unwrap()
+}
+
+// Test bigint_solve_from_to_le_bytes with a guaranteed-invalid modulus
+// and optional pedantic_solving
+fn bigint_from_to_le_bytes_disallowed_modulus_helper(
+    modulus: &mut Vec<u8>,
+    patch_location: usize,
+    patch_amount: u8,
+    zero_or_ones_constant: bool,
+    use_constant: bool,
+    pedantic_solving: bool,
+) -> (Vec<FieldElement>, Vec<FieldElement>) {
+    let allowed_moduli: HashSet<Vec<u8>> =
+        BigIntSolver::allowed_bigint_moduli().into_iter().collect();
+    let mut patch_location = patch_location % modulus.len();
+    let patch_amount = patch_amount.clamp(1, u8::MAX);
+    while allowed_moduli.contains(modulus) {
+        modulus[patch_location] = patch_amount.wrapping_add(modulus[patch_location]);
+        patch_location += 1;
+        patch_location %= modulus.len();
+    }
+
+    let zero_function_input =
+        if zero_or_ones_constant { FieldElement::zero() } else { FieldElement::one() };
+    let zero: Vec<_> = modulus.iter().map(|_| (zero_function_input, use_constant)).collect();
+    let expected_results: Vec<_> = drop_use_constant(&zero);
+    let results = bigint_solve_from_to_le_bytes(modulus.clone(), zero, pedantic_solving);
+
+    (results, expected_results)
+}
+
+>>>>>>> 693321910d (feat: field-agnostic frontend with BigInt support in SSA)
 fn function_input_from_option(
     witness: Witness,
     opt_constant: Option<FieldElement>,
@@ -1216,9 +1342,6 @@ proptest! {
         let (lhs, rhs) = prop_assert_zero_l(and_op, zero, x, Some(x.0.num_bits()));
         prop_assert_eq!(lhs, rhs);
     }
-
-
-
 
     #[test]
     fn sha256_compression_injective(inputs_distinct_inputs in any_distinct_inputs(None, 24, 24)) {

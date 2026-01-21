@@ -7,16 +7,15 @@ use std::{cell::RefCell, collections::BTreeMap};
 use acir::FieldElement;
 use acir::native_types::WitnessMap;
 use arbitrary::Unstructured;
-use bn254_blackbox_solver::Bn254BlackBoxSolver;
+use m31_blackbox_solver::M31BlackBoxSolver;
 use color_eyre::eyre::{self, WrapErr};
 use nargo::NargoError;
 use nargo::errors::ExecutionError;
 use nargo::{foreign_calls::DefaultForeignCallBuilder, parse_all};
 use noirc_abi::Abi;
-use noirc_artifacts::program::CompiledProgram;
 use noirc_driver::{
-    CompilationResult, CompileOptions, CrateId, compile_main, file_manager_with_stdlib,
-    prepare_crate,
+    CompilationResult, CompileOptions, CompiledProgram, CrateId, compile_main,
+    file_manager_with_stdlib, prepare_crate,
 };
 use noirc_errors::CustomDiagnostic;
 use noirc_evaluator::ssa::SsaProgramArtifact;
@@ -28,7 +27,6 @@ use noirc_frontend::{
 
 use super::{CompareArtifact, CompareCompiledResult, CompareOptions, HasPrograms};
 use crate::compare::compiled::ExecResult;
-use crate::compare::logging;
 use crate::{
     Config, DisplayAstAsNoirComptime, arb_program_comptime, program_abi, program_wrap_expression,
 };
@@ -101,23 +99,23 @@ impl CompareComptime {
         // Include the print part of stdlib for the elaborator to be able to use the print oracle
         let import_print = r#"
         #[oracle(print)]
-        unconstrained fn print_oracle<T>(with_newline: bool, input: T) {}
+        unconstrained fn print_oracle<T>(with_newline: bool, input: T) {{}}
 
-        unconstrained fn print_unconstrained<T>(with_newline: bool, input: T) {
+        unconstrained fn print_unconstrained<T>(with_newline: bool, input: T) {{
             print_oracle(with_newline, input);
-        }
+        }}
 
-        pub fn println<T>(input: T) {
-            unsafe {
+        pub fn println<T>(input: T) {{
+            unsafe {{
                 print_unconstrained(true, input);
-            }
-        }
+            }}
+        }}
 
-        pub fn print<T>(input: T) {
-            unsafe {
+        pub fn print<T>(input: T) {{
+            unsafe {{
                 print_unconstrained(false, input);
-            }
-        }
+            }}
+        }}
         "#;
 
         // Add comptime modifier for main
@@ -130,6 +128,8 @@ impl CompareComptime {
             String::from_utf8(output).expect("not UTF-8")
         };
 
+        // Log source code before interpreting
+        log::debug!("comptime src:\n{}", self.source);
         let comptime_expr = match interpret(source.as_str(), output.clone()) {
             Ok(expr) => expr,
             Err(e) => {
@@ -182,6 +182,7 @@ impl CompareComptime {
             Self::exec_bytecode(&self.ssa.artifact.program, initial_witness.clone());
 
         // Try to compile the 1st (comptime) version from string.
+        log::debug!("comptime src:\n{}", self.source);
         let (program1, output1) = match prepare_and_compile_snippet(
             self.source.clone(),
             self.force_brillig,
@@ -225,13 +226,10 @@ impl CompareComptime {
         let force_brillig = c.force_brillig;
         let program = arb_program_comptime(u, c)?;
         let abi = program_abi(&program);
-        logging::log_program(&program, "");
 
         let ssa = CompareArtifact::from(f(program.clone())?);
-        logging::log_options(&ssa.options, "compiled");
 
         let source = format!("{}", DisplayAstAsNoirComptime(&program));
-        logging::log_comptime(&source, "");
 
         Ok(Self { program, abi, source, ssa, force_brillig })
     }
@@ -241,7 +239,7 @@ impl CompareComptime {
         program: &acir::circuit::Program<FieldElement>,
         initial_witness: WitnessMap<FieldElement>,
     ) -> ExecResult {
-        let blackbox_solver = Bn254BlackBoxSolver;
+        let blackbox_solver = M31BlackBoxSolver(false);
         let mut output = Vec::new();
 
         let mut foreign_call_executor =
@@ -270,14 +268,11 @@ impl CompareComptime {
 
     /// Check if a comptime error is due to some kind of arithmetic or constraint failure.
     fn is_assertion_diagnostic(e: &CustomDiagnostic) -> bool {
-        let msg = e.message.to_lowercase();
         e.secondaries.iter().any(|s| s.message == "Assertion failed")
-            || msg.contains("overflow")
-            || msg.contains("cannot fit into") // covers signed overflows
-            || msg.contains("divide by zero")
-            || msg.contains("division by zero")
-            || msg.contains("the remainder with a divisor of zero")
-            || msg.contains("out of bounds")
+            || e.message.to_lowercase().contains("overflow")
+            || e.message.to_lowercase().contains("cannot fit into") // covers signed overflows
+            || e.message.to_lowercase().contains("divide by zero")
+            || e.message.to_lowercase().contains("division by zero")
     }
 
     /// Fabricate a result from a comptime `CustomDiagnostic` on the 1st side,

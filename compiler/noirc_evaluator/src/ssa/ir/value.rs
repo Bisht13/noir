@@ -1,4 +1,5 @@
-use rustc_hash::FxHashMap as HashMap;
+use fxhash::FxHashMap as HashMap;
+use num_bigint::BigInt;
 use std::borrow::Cow;
 
 use acvm::FieldElement;
@@ -37,7 +38,7 @@ pub enum Value {
     Param { block: BasicBlockId, position: usize, typ: Type },
 
     /// This Value originates from a numeric constant
-    NumericConstant { constant: FieldElement, typ: NumericType },
+    NumericConstant { constant: BigInt, typ: NumericType },
 
     /// This Value refers to a function in the IR.
     /// Functions always have the type Type::Function.
@@ -92,27 +93,11 @@ impl ValueMapping {
         self.map.insert(from, to);
     }
 
-    pub(crate) fn batch_insert(&mut self, from: &[ValueId], to: &[ValueId]) {
-        assert_eq!(from.len(), to.len(), "Lengths of arrays of values being mapped must match");
-        for (from_value, to_value) in from.iter().zip(to) {
-            self.insert(*from_value, *to_value);
-        }
-    }
-
     pub(crate) fn get(&self, value: ValueId) -> ValueId {
         if let Some(replacement) = self.map.get(&value) { self.get(*replacement) } else { value }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.map.is_empty()
-    }
-
-    /// Returns true if all [`ValueId`]s are mapped to a [`ValueId`] of the same type.
-    ///
-    /// Mapping a [`ValueId`] to one of a different type implies a compilation error.
-    #[must_use]
-    #[cfg(debug_assertions)]
-    pub(crate) fn value_types_are_consistent(&self, dfg: &super::dfg::DataFlowGraph) -> bool {
-        self.map.iter().all(|(from, to)| dfg.type_of_value(*from) == dfg.type_of_value(*to))
     }
 }

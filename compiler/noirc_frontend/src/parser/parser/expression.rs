@@ -1099,7 +1099,7 @@ mod tests {
                 get_source_with_error_span,
             },
         },
-        signed_field::SignedField,
+        signed_field::SignedInteger,
         token::Token,
     };
 
@@ -1130,7 +1130,7 @@ mod tests {
         let ExpressionKind::Literal(Literal::Integer(value, Some(U32))) = expr.kind else {
             panic!("Expected integer literal");
         };
-        assert_eq!(value, SignedField::positive(42_u128));
+        assert_eq!(value, SignedInteger::positive(42_u128));
     }
 
     #[test]
@@ -1140,7 +1140,7 @@ mod tests {
         let ExpressionKind::Literal(Literal::Integer(value, None)) = expr.kind else {
             panic!("Expected integer literal");
         };
-        assert_eq!(value, SignedField::negative(42_u128));
+        assert_eq!(value, SignedInteger::negative(42_u128));
     }
 
     #[test]
@@ -1161,7 +1161,7 @@ mod tests {
         let ExpressionKind::Literal(Literal::Integer(value, None)) = expr.kind else {
             panic!("Expected integer literal");
         };
-        assert_eq!(value, SignedField::positive(42_u128));
+        assert_eq!(value, SignedInteger::positive(42_u128));
     }
 
     #[test]
@@ -1216,13 +1216,13 @@ mod tests {
         let ExpressionKind::Literal(Literal::Integer(value, None)) = expr.kind else {
             panic!("Expected integer literal");
         };
-        assert_eq!(value, SignedField::positive(1_u128));
+        assert_eq!(value, SignedInteger::positive(1_u128));
 
         let expr = exprs.remove(0);
         let ExpressionKind::Literal(Literal::Integer(value, None)) = expr.kind else {
             panic!("Expected integer literal");
         };
-        assert_eq!(value, SignedField::positive(2_u128));
+        assert_eq!(value, SignedInteger::positive(2_u128));
     }
 
     #[test]
@@ -1242,7 +1242,7 @@ mod tests {
         let ExpressionKind::Literal(Literal::Integer(value, None)) = expr.kind else {
             panic!("Expected integer literal");
         };
-        assert_eq!(value, SignedField::positive(1_u128));
+        assert_eq!(value, SignedInteger::positive(1_u128));
     }
 
     #[test]

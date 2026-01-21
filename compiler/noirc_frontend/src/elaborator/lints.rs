@@ -20,6 +20,7 @@ use crate::{
     token::{FunctionAttributeKind, SecondaryAttributeKind},
 };
 
+use acvm::{AcirField, FieldElement};
 use noirc_errors::Location;
 
 pub(super) fn deprecated_function(interner: &NodeInterner, expr: ExprId) -> Option<TypeCheckError> {
@@ -387,6 +388,17 @@ pub(crate) fn check_integer_literal_fits_its_type(
                         expr: value,
                         ty: typ.clone(),
                         range: format!("-{min}..={max}"),
+                        location,
+                    });
+                }
+            }
+            // TODO: write tests for this
+            Type::FieldElement => {
+                if value.absolute_value() >= FieldElement::modulus() {
+                    return Some(TypeCheckError::IntegerLiteralDoesNotFitItsType {
+                        expr: value,
+                        ty: typ.clone(),
+                        range: format!("0..={}", FieldElement::modulus()),
                         location,
                     });
                 }

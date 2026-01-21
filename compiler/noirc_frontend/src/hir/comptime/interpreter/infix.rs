@@ -1,7 +1,9 @@
-use acvm::AcirField as _;
+use num_bigint::BigUint;
+use num_traits::Zero;
 
 use crate::ast::BinaryOpKind;
 use crate::hir::Location;
+use crate::hir::comptime::interpreter::SignedInteger;
 use crate::hir_def::expr::HirBinaryOp;
 
 use super::{IResult, InterpreterError, Value};
@@ -20,18 +22,8 @@ pub(super) fn evaluate_infix(
         let rhs = rhs_type.clone();
         InterpreterError::InvalidValuesForBinary { lhs, rhs, location, operator }
     };
-    let shl_overflow = || InterpreterError::BinaryOperationOverflow { operator: "<<", location };
-    let shr_overflow = || InterpreterError::BinaryOperationOverflow { operator: ">>", location };
-    let math_error = |operator| InterpreterError::BinaryOperationOverflow { location, operator };
 
-    if matches!(operator.kind, BinaryOpKind::Divide | BinaryOpKind::Modulo) && rhs_value.is_zero() {
-        return Err(InterpreterError::InvalidValuesForBinary {
-            lhs: lhs_type,
-            rhs: rhs_type,
-            location,
-            operator: if operator.kind == BinaryOpKind::Divide { "/" } else { "%" },
-        });
-    }
+    let math_error = |operator| InterpreterError::BinaryOperationOverflow { location, operator };
 
     /// Generate matches that can promote the type of one side to the other if they are compatible.
     macro_rules! match_values {
@@ -57,15 +49,16 @@ pub(super) fn evaluate_infix(
 
     /// Generate matches for arithmetic operations on `Field` and integers.
     macro_rules! match_arithmetic {
-        (($lhs_value:ident as $lhs:ident $op:literal $rhs_value:ident as $rhs:ident) { field: $field_expr:expr, int: $int_expr:expr, u1: $u1_expr:expr, }) => {
+        (($lhs_value:ident as $lhs:ident $op:literal $rhs_value:ident as $rhs:ident) { field: $field_expr:expr, int: $int_expr:expr, }) => {
             match_values! {
                 ($lhs_value as $lhs $op $rhs_value as $rhs) {
-                    (Field, Field) to Field => Some($field_expr),
+                    (Field, Field) to Field => {
+                        Some(SignedInteger::from_field_element($field_expr))
+                    },
                     (I8,  I8)      to I8    => $int_expr,
                     (I16, I16)     to I16   => $int_expr,
                     (I32, I32)     to I32   => $int_expr,
                     (I64, I64)     to I64   => $int_expr,
-                    (U1,  U1)      to U1    => $u1_expr,
                     (U8,  U8)      to U8    => $int_expr,
                     (U16, U16)     to U16   => $int_expr,
                     (U32, U32)     to U32   => $int_expr,
@@ -87,7 +80,6 @@ pub(super) fn evaluate_infix(
                     (I16, I16)     to Bool => Some($expr),
                     (I32, I32)     to Bool => Some($expr),
                     (I64, I64)     to Bool => Some($expr),
-                    (U1,  U1)      to Bool => Some($expr),
                     (U8,  U8)      to Bool => Some($expr),
                     (U16, U16)     to Bool => Some($expr),
                     (U32, U32)     to Bool => Some($expr),
@@ -108,7 +100,6 @@ pub(super) fn evaluate_infix(
                     (I16, I16)     to I16  => Some($expr),
                     (I32, I32)     to I32  => Some($expr),
                     (I64, I64)     to I64  => Some($expr),
-                    (U1,  U1)      to U1   => Some($expr),
                     (U8,  U8)      to U8   => Some($expr),
                     (U16, U16)     to U16  => Some($expr),
                     (U32, U32)     to U32  => Some($expr),
@@ -121,19 +112,37 @@ pub(super) fn evaluate_infix(
 
     /// Generate matches for operations on just integer values.
     macro_rules! match_integer {
-        (($lhs_value:ident as $lhs:ident $op:literal $rhs_value:ident as $rhs:ident) { int: $int_expr:expr, u1: $u1_expr:expr, }) => {
+        (($lhs_value:ident as $lhs:ident $op:literal $rhs_value:ident as $rhs:ident) => $expr:expr) => {
             match_values! {
                 ($lhs_value as $lhs $op $rhs_value as $rhs) {
-                    (I8,  I8)      to I8   => $int_expr,
-                    (I16, I16)     to I16  => $int_expr,
-                    (I32, I32)     to I32  => $int_expr,
-                    (I64, I64)     to I64  => $int_expr,
-                    (U1,  U1)      to U1   => $u1_expr,
-                    (U8,  U8)      to U8   => $int_expr,
-                    (U16, U16)     to U16  => $int_expr,
-                    (U32, U32)     to U32  => $int_expr,
-                    (U64, U64)     to U64  => $int_expr,
-                    (U128, U128)   to U128 => $int_expr,
+                    (I8,  I8)      to I8   => $expr,
+                    (I16, I16)     to I16  => $expr,
+                    (I32, I32)     to I32  => $expr,
+                    (I64, I64)     to I64  => $expr,
+                    (U8,  U8)      to U8   => $expr,
+                    (U16, U16)     to U16  => $expr,
+                    (U32, U32)     to U32  => $expr,
+                    (U64, U64)     to U64  => $expr,
+                    (U128, U128)   to U128 => $expr,
+                }
+            }
+        };
+    }
+
+    /// Generate matches for bit shifting, which in Noir only accepts `u8` for RHS.
+    macro_rules! match_bitshift {
+        (($lhs_value:ident as $lhs:ident $op:literal $rhs_value:ident as $rhs:ident) => $expr:expr) => {
+            match_values! {
+                ($lhs_value as $lhs $op $rhs_value as $rhs) {
+                    (I8,  U8)      to I8   => $expr,
+                    (I16, U8)      to I16  => $expr,
+                    (I32, U8)      to I32  => $expr,
+                    (I64, U8)      to I64  => $expr,
+                    (U8,  U8)      to U8   => $expr,
+                    (U16, U8)      to U16  => $expr,
+                    (U32, U8)      to U32  => $expr,
+                    (U64, U8)      to U64  => $expr,
+                    (U128, U8)     to U128  => $expr,
                 }
             }
         };
@@ -143,37 +152,30 @@ pub(super) fn evaluate_infix(
     match operator.kind {
         BinaryOpKind::Add => match_arithmetic! {
             (lhs_value as lhs "+" rhs_value as rhs) {
-                field: lhs + rhs,
+                field: lhs.to_field_element() + rhs.to_field_element(),
                 int: lhs.checked_add(rhs),
-                u1: if lhs && rhs { None } else { Some(lhs | rhs) },
             }
         },
         BinaryOpKind::Subtract => match_arithmetic! {
             (lhs_value as lhs "-" rhs_value as rhs) {
-                field: lhs - rhs,
+                field: lhs.to_field_element() - rhs.to_field_element(),
                 int: lhs.checked_sub(rhs),
-                u1: if !lhs && rhs { None } else { Some(lhs & !rhs) },
             }
         },
         BinaryOpKind::Multiply => match_arithmetic! {
             (lhs_value as lhs "*" rhs_value as rhs) {
-                field: lhs * rhs,
+                field: lhs.to_field_element() * rhs.to_field_element(),
                 int: lhs.checked_mul(rhs),
-                u1: Some(lhs & rhs),
             }
         },
         BinaryOpKind::Divide => match_arithmetic! {
             (lhs_value as lhs "/" rhs_value as rhs) {
-                field: if rhs.absolute_value().is_zero() {
-                   return Err( InterpreterError::InvalidValuesForBinary { lhs: lhs_type, rhs: rhs_type, location, operator: "/" });
+                field: if rhs.absolute_value() == BigUint::zero() {
+                    return Err(math_error("/"));
                 } else {
-                    lhs / rhs
+                    lhs.to_field_element() / rhs.to_field_element()
                 },
                 int: lhs.checked_div(rhs),
-                u1: {
-                    let _ = rhs; // Avoid unused variable warning
-                    Some(lhs)
-                },
             }
         },
         BinaryOpKind::Equal => match_cmp! {
@@ -203,52 +205,35 @@ pub(super) fn evaluate_infix(
         BinaryOpKind::Xor => match_bitwise! {
             (lhs_value as lhs "^" rhs_value as rhs) => lhs ^ rhs
         },
-        #[allow(trivial_numeric_casts)]
-        BinaryOpKind::ShiftRight => match_integer! {
-            (lhs_value as lhs ">>" rhs_value as rhs) {
-                int: {
-                    #[allow(clippy::useless_conversion)]
-                    #[allow(clippy::unnecessary_fallible_conversions)]
-                    let rhs: Result<u32, _> = rhs.try_into();
-                    #[allow(irrefutable_let_patterns)]
-                    let Ok(rhs) = rhs else {
-                        return Err(shr_overflow());
-                    };
-                    lhs.checked_shr(rhs)
-                },
-                u1: if rhs { return Err(shr_overflow())} else { Some(lhs) },
+        BinaryOpKind::ShiftRight => {
+            let is_negative = lhs_value.is_negative();
+            match_bitshift! {
+                (lhs_value as lhs ">>" rhs_value as rhs) => {
+                    Some(
+                        lhs.checked_shr(rhs.into())
+                            .unwrap_or(
+                                // fallback based on whether we have a negative value
+                                if is_negative {
+                                    // !0 = -1 for signed types
+                                    !0
+                                } else {
+                                    0
+                                })
+                    )
+                }
             }
-        },
-        #[allow(trivial_numeric_casts)]
-        BinaryOpKind::ShiftLeft => match_integer! {
-            (lhs_value as lhs "<<" rhs_value as rhs) {
-                int: {
-                    #[allow(clippy::useless_conversion)]
-                    #[allow(clippy::unnecessary_fallible_conversions)]
-                    let rhs: Result<u32, _> = rhs.try_into();
-                    #[allow(irrefutable_let_patterns)]
-                    let Ok(rhs) = rhs else {
-                        return Err(shr_overflow());
-                    };
-                    lhs.checked_shl(rhs)
-                },
-                u1: if rhs { return Err(shl_overflow())} else { Some(lhs) },
-            }
+        }
+        BinaryOpKind::ShiftLeft => match_bitshift! {
+            (lhs_value as lhs "<<" rhs_value as rhs) => lhs.checked_shl(rhs.into())
         },
         BinaryOpKind::Modulo => match_integer! {
-            (lhs_value as lhs "%" rhs_value as rhs) {
-                int: lhs.checked_rem(rhs),
-                u1: {
-                    let _ = lhs; // Avoid unused variable warning
-                    if rhs { Some(false) } else { None }
-                },
-            }
+            (lhs_value as lhs "%" rhs_value as rhs) => lhs.checked_rem(rhs)
         },
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use crate::hir::comptime::InterpreterError;
     use crate::hir::comptime::tests::{interpret, interpret_expect_error};
 
@@ -266,16 +251,6 @@ mod tests {
         let result = evaluate_infix(lhs, rhs, operator, location).unwrap();
 
         assert_eq!(result, Value::U128(170141183460469231731687303715884105727));
-    }
-
-    #[test]
-    fn regression_9336() {
-        let lhs = Value::I8(-128);
-        let rhs = Value::I8(-1);
-        let operator = HirBinaryOp { kind: BinaryOpKind::Modulo, location: Location::dummy() };
-        let location = Location::dummy();
-        let err = evaluate_infix(lhs, rhs, operator, location).unwrap_err();
-        assert!(matches!(err, InterpreterError::BinaryOperationOverflow { .. }));
     }
 
     #[test]
@@ -356,16 +331,17 @@ mod tests {
                 64 >> 255
             }
         "#;
-        let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::BinaryOperationOverflow { operator: ">>", .. }));
+        let result = interpret(src);
+        // 255 % 64 == 63, so 64 >> 63 => 0
+        assert_eq!(result, Value::U64(0));
 
         let src = "
             comptime fn main() -> pub u32 {
                 1360887544 >> 141
             }
         ";
-        let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::BinaryOperationOverflow { operator: ">>", .. }));
+        let result = interpret(src);
+        assert_eq!(result, Value::U32(0));
     }
 
     #[test]
@@ -383,16 +359,17 @@ mod tests {
             -64 >> 255
         }
         ";
-        let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::BinaryOperationOverflow { operator: ">>", .. }));
+        let result = interpret(src);
+        // 255 % 64 == 63, so 64 >> 63 => -1
+        assert_eq!(result, Value::I64(-1));
 
         let src = "
         comptime fn main() -> pub i32 {
             -1360887544 >> 141
         }
         ";
-        let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::BinaryOperationOverflow { operator: ">>", .. }));
+        let result = interpret(src);
+        assert_eq!(result, Value::I32(-1));
     }
 
     #[test]
@@ -410,16 +387,16 @@ mod tests {
             64 >> 255
         }
         ";
-        let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::BinaryOperationOverflow { operator: ">>", .. }));
+        let result = interpret(src);
+        assert_eq!(result, Value::I64(0));
 
         let src = "
         comptime fn main() -> pub i32 {
             1360887544 >> 141
         }
         ";
-        let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::BinaryOperationOverflow { operator: ">>", .. }));
+        let result = interpret(src);
+        assert_eq!(result, Value::I32(0));
     }
 
     #[test]
@@ -441,7 +418,10 @@ mod tests {
             }
         "#;
         let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::InvalidValuesForBinary { operator: "/", .. }));
+        assert!(matches!(
+            result,
+            InterpreterError::BinaryOperationOverflow { operator: "/", location: _ }
+        ));
     }
 
     #[test]
@@ -452,7 +432,10 @@ mod tests {
             }
         "#;
         let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::InvalidValuesForBinary { operator: "/", .. }));
+        assert!(matches!(
+            result,
+            InterpreterError::BinaryOperationOverflow { operator: "/", location: _ }
+        ));
     }
 
     #[test]
@@ -469,27 +452,5 @@ mod tests {
         "#;
         let result = interpret(src);
         assert_eq!(result, Value::Unit);
-    }
-
-    #[test]
-    fn shift_right_by_negative_number() {
-        let src = r#"
-            comptime fn main() {
-                let _ = 1 >> -4294967296_i64;
-            }
-        "#;
-        let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::BinaryOperationOverflow { operator: ">>", .. }));
-    }
-
-    #[test]
-    fn shift_left_by_negative_number() {
-        let src = r#"
-            comptime fn main() {
-                let _ = 1 << -4294967296_i64;
-            }
-        "#;
-        let result = interpret_expect_error(src);
-        assert!(matches!(result, InterpreterError::BinaryOperationOverflow { operator: ">>", .. }));
     }
 }

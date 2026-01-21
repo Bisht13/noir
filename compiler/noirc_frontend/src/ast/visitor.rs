@@ -1,4 +1,5 @@
-use noirc_errors::{Location, Span};
+use noirc_errors::Span;
+use num_bigint::BigUint;
 
 use crate::{
     BinaryTypeOperator, ParsedModule,
@@ -7,16 +8,16 @@ use crate::{
         CastExpression, ConstrainExpression, ConstructorExpression, Expression, ExpressionKind,
         ForLoopStatement, ForRange, Ident, IfExpression, IndexExpression, InfixExpression, LValue,
         Lambda, LetStatement, Literal, MemberAccessExpression, MethodCallExpression,
-        ModuleDeclaration, NoirFunction, NoirStruct, NoirTrait, NoirTraitImpl, Path,
-        PrefixExpression, Statement, StatementKind, TraitImplItem, TraitItem, TypeImpl,
-        UnresolvedGeneric, UseTree, UseTreeKind,
+        ModuleDeclaration, NoirFunction, NoirStruct, NoirTrait, NoirTraitImpl, NoirTypeAlias, Path,
+        PrefixExpression, Statement, StatementKind, TraitImplItem, TraitItem, TypeImpl, UseTree,
+        UseTreeKind,
     },
     node_interner::{
         ExprId, InternedExpressionKind, InternedPattern, InternedStatementKind,
         InternedUnresolvedTypeData, QuotedTypeId,
     },
     parser::{Item, ItemKind, ParsedSubModule},
-    signed_field::SignedField,
+    signed_field::SignedInteger,
     token::{
         FmtStrFragment, IntegerTypeSuffix, MetaAttribute, MetaAttributeName, SecondaryAttribute,
         SecondaryAttributeKind, Tokens,
@@ -25,7 +26,7 @@ use crate::{
 
 use super::{
     ForBounds, FunctionReturnType, GenericTypeArgs, ItemVisibility, MatchExpression,
-    NoirEnumeration, Pattern, TraitBound, TraitImplItemKind, TypeAlias, TypePath,
+    NoirEnumeration, Pattern, TraitBound, TraitImplItemKind, TypePath, UnresolvedGeneric,
     UnresolvedGenerics, UnresolvedTraitConstraint, UnresolvedType, UnresolvedTypeData,
     UnresolvedTypeExpression, UnsafeExpression,
 };
@@ -86,7 +87,7 @@ pub trait Visitor {
     fn visit_trait_impl_item_constant(
         &mut self,
         _name: &Ident,
-        _typ: Option<&UnresolvedType>,
+        _typ: &UnresolvedType,
         _expression: &Expression,
         _span: Span,
     ) -> bool {
@@ -96,7 +97,7 @@ pub trait Visitor {
     fn visit_trait_impl_item_type(
         &mut self,
         _name: &Ident,
-        _alias: Option<&UnresolvedType>,
+        _alias: &UnresolvedType,
         _span: Span,
     ) -> bool {
         true
@@ -122,7 +123,12 @@ pub trait Visitor {
         true
     }
 
-    fn visit_trait_item_constant(&mut self, _name: &Ident, _typ: Option<&UnresolvedType>) -> bool {
+    fn visit_trait_item_constant(
+        &mut self,
+        _name: &Ident,
+        _typ: &UnresolvedType,
+        _default_value: &Option<Expression>,
+    ) -> bool {
         true
     }
 
@@ -148,7 +154,7 @@ pub trait Visitor {
         true
     }
 
-    fn visit_noir_type_alias(&mut self, _: &TypeAlias, _: Span) -> bool {
+    fn visit_noir_type_alias(&mut self, _: &NoirTypeAlias, _: Span) -> bool {
         true
     }
 
@@ -166,7 +172,7 @@ pub trait Visitor {
         true
     }
 
-    fn visit_literal_vector(&mut self, _: &ArrayLiteral, _: Span) -> bool {
+    fn visit_literal_slice(&mut self, _: &ArrayLiteral, _: Span) -> bool {
         true
     }
 
@@ -174,7 +180,7 @@ pub trait Visitor {
 
     fn visit_literal_integer(
         &mut self,
-        _value: SignedField,
+        _value: SignedInteger,
         _suffix: Option<IntegerTypeSuffix>,
         _: Span,
     ) {
@@ -337,7 +343,7 @@ pub trait Visitor {
         true
     }
 
-    fn visit_lvalue_path(&mut self, _: &Path) {}
+    fn visit_lvalue_ident(&mut self, _: &Ident) {}
 
     fn visit_lvalue_member_access(
         &mut self,
@@ -383,7 +389,7 @@ pub trait Visitor {
         true
     }
 
-    fn visit_vector_type(&mut self, _: &UnresolvedType, _: Span) -> bool {
+    fn visit_slice_type(&mut self, _: &UnresolvedType, _: Span) -> bool {
         true
     }
 
@@ -430,7 +436,7 @@ pub trait Visitor {
 
     fn visit_unit_type(&mut self, _: Span) {}
 
-    fn visit_resolved_type(&mut self, _: QuotedTypeId, _: Location) {}
+    fn visit_resolved_type(&mut self, _: QuotedTypeId, _: Span) {}
 
     fn visit_interned_type(&mut self, _: InternedUnresolvedTypeData, _: Span) {}
 
@@ -468,7 +474,7 @@ pub trait Visitor {
 
     fn visit_constant_type_expression(
         &mut self,
-        _value: SignedField,
+        _value: BigUint,
         _suffix: Option<IntegerTypeSuffix>,
         _span: Span,
     ) {
@@ -686,23 +692,14 @@ impl TraitImplItemKind {
                 }
             }
             TraitImplItemKind::Constant(name, unresolved_type, expression) => {
-                if visitor.visit_trait_impl_item_constant(
-                    name,
-                    unresolved_type.as_ref(),
-                    expression,
-                    span,
-                ) {
-                    if let Some(unresolved_type) = unresolved_type {
-                        unresolved_type.accept(visitor);
-                    }
+                if visitor.visit_trait_impl_item_constant(name, unresolved_type, expression, span) {
+                    unresolved_type.accept(visitor);
                     expression.accept(visitor);
                 }
             }
             TraitImplItemKind::Type { name, alias } => {
-                if visitor.visit_trait_impl_item_type(name, alias.as_ref(), span) {
-                    if let Some(alias) = alias {
-                        alias.accept(visitor);
-                    }
+                if visitor.visit_trait_impl_item_type(name, alias, span) {
+                    alias.accept(visitor);
                 }
             }
         }
@@ -796,10 +793,12 @@ impl TraitItem {
                     }
                 }
             }
-            TraitItem::Constant { name, typ } => {
-                if visitor.visit_trait_item_constant(name, typ.as_ref()) {
-                    if let Some(typ) = typ {
-                        typ.accept(visitor);
+            TraitItem::Constant { name, typ, default_value } => {
+                if visitor.visit_trait_item_constant(name, typ, default_value) {
+                    typ.accept(visitor);
+
+                    if let Some(default_value) = default_value {
+                        default_value.accept(visitor);
                     }
                 }
             }
@@ -875,7 +874,7 @@ impl NoirEnumeration {
     }
 }
 
-impl TypeAlias {
+impl NoirTypeAlias {
     pub fn accept(&self, span: Span, visitor: &mut impl Visitor) {
         if visitor.visit_noir_type_alias(self, span) {
             self.accept_children(visitor);
@@ -1000,14 +999,14 @@ impl Literal {
                     array_literal.accept(span, visitor);
                 }
             }
-            Literal::Vector(array_literal) => {
-                if visitor.visit_literal_vector(array_literal, span) {
+            Literal::Slice(array_literal) => {
+                if visitor.visit_literal_slice(array_literal, span) {
                     array_literal.accept(span, visitor);
                 }
             }
             Literal::Bool(value) => visitor.visit_literal_bool(*value, span),
             Literal::Integer(value, suffix) => {
-                visitor.visit_literal_integer(*value, *suffix, span);
+                visitor.visit_literal_integer(value.clone(), *suffix, span);
             }
             Literal::Str(str) => visitor.visit_literal_str(str, span),
             Literal::RawStr(str, length) => visitor.visit_literal_raw_str(str, *length, span),
@@ -1178,9 +1177,7 @@ impl Lambda {
 
     pub fn accept_children(&self, visitor: &mut impl Visitor) {
         for (_, unresolved_type) in &self.parameters {
-            if let Some(typ) = unresolved_type {
-                typ.accept(visitor);
-            }
+            unresolved_type.accept(visitor);
         }
 
         self.body.accept(visitor);
@@ -1232,9 +1229,9 @@ impl Statement {
             StatementKind::For(for_loop_statement) => {
                 for_loop_statement.accept(visitor);
             }
-            StatementKind::Loop(loop_) => {
-                if visitor.visit_loop_statement(&loop_.body) {
-                    loop_.body.accept(visitor);
+            StatementKind::Loop(block, _) => {
+                if visitor.visit_loop_statement(block) {
+                    block.accept(visitor);
                 }
             }
             StatementKind::While(while_) => {
@@ -1272,9 +1269,7 @@ impl LetStatement {
 
     pub fn accept_children(&self, visitor: &mut impl Visitor) {
         self.pattern.accept(visitor);
-        if let Some(typ) = &self.r#type {
-            typ.accept(visitor);
-        }
+        self.r#type.accept(visitor);
         self.expression.accept(visitor);
     }
 }
@@ -1326,7 +1321,7 @@ impl LValue {
 
     pub fn accept_children(&self, visitor: &mut impl Visitor) {
         match self {
-            LValue::Path(path) => visitor.visit_lvalue_path(path),
+            LValue::Ident(ident) => visitor.visit_lvalue_ident(ident),
             LValue::MemberAccess { object, field_name, location } => {
                 if visitor.visit_lvalue_member_access(object, field_name, location.span) {
                     object.accept(visitor);
@@ -1425,8 +1420,8 @@ impl UnresolvedType {
                     unresolved_type.accept(visitor);
                 }
             }
-            UnresolvedTypeData::Vector(unresolved_type) => {
-                if visitor.visit_vector_type(unresolved_type, self.location.span) {
+            UnresolvedTypeData::Slice(unresolved_type) => {
+                if visitor.visit_slice_type(unresolved_type, self.location.span) {
                     unresolved_type.accept(visitor);
                 }
             }
@@ -1474,9 +1469,10 @@ impl UnresolvedType {
                     expr.accept(visitor);
                 }
             }
+            UnresolvedTypeData::Unspecified => visitor.visit_unspecified_type(self.location.span),
             UnresolvedTypeData::Unit => visitor.visit_unit_type(self.location.span),
             UnresolvedTypeData::Resolved(id) => {
-                visitor.visit_resolved_type(*id, self.location);
+                visitor.visit_resolved_type(*id, self.location.span);
             }
             UnresolvedTypeData::Interned(id) => {
                 visitor.visit_interned_type(*id, self.location.span);
@@ -1564,8 +1560,8 @@ impl UnresolvedTypeExpression {
                     path.accept(visitor);
                 }
             }
-            UnresolvedTypeExpression::Constant(value, suffix, location) => {
-                visitor.visit_constant_type_expression(*value, *suffix, location.span);
+            UnresolvedTypeExpression::Constant(integer, suffix, location) => {
+                visitor.visit_constant_type_expression(integer.clone(), *suffix, location.span);
             }
             UnresolvedTypeExpression::BinaryOperation(lhs, op, rhs, location) => {
                 if visitor.visit_binary_type_expression(lhs, *op, rhs, location.span) {
@@ -1641,6 +1637,7 @@ impl UnresolvedGeneric {
             UnresolvedGeneric::Numeric { ident: _, typ } => {
                 typ.accept(visitor);
             }
+            UnresolvedGeneric::Resolved(_quoted_type_id, _location) => (),
         }
     }
 }

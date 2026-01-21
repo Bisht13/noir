@@ -308,7 +308,7 @@ mod rules {
     use noirc_frontend::{
         ast::BinaryOpKind,
         monomorphization::ast::{Binary, Definition, Expression, Ident, Literal, Type},
-        signed_field::SignedField,
+        signed_field::SignedInteger,
     };
 
     #[derive(Clone, Debug, Default)]
@@ -436,9 +436,9 @@ mod rules {
                 // Make them have the same sign, so they are on the same side of 0 and a single number
                 // can add up to them without overflow. (e.g. there is no x such that `i32::MIN + x == i32::MAX`)
                 if a.is_negative() && !b.is_negative() {
-                    *b = SignedField::negative(b.absolute_value());
+                    *b = SignedInteger::negative(b.absolute_value());
                 } else if !a.is_negative() && b.is_negative() {
-                    *b = SignedField::positive(b.absolute_value() - FieldElement::one()); // -1 just to avoid the potential of going from e.g. i8 -128 to 128 where the maximum is 127.
+                    *b = SignedInteger::positive(b.absolute_value() - FieldElement::one()); // -1 just to avoid the potential of going from e.g. i8 -128 to 128 where the maximum is 127.
                 }
 
                 let (op, c) = if *a >= *b {

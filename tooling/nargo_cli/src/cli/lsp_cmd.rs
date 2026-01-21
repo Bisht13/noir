@@ -2,7 +2,7 @@ use async_lsp::{
     concurrency::ConcurrencyLayer, panic::CatchUnwindLayer, server::LifecycleLayer,
     tracing::TracingLayer,
 };
-use bn254_blackbox_solver::Bn254BlackBoxSolver;
+use m31_blackbox_solver::M31BlackBoxSolver;
 use clap::Args;
 use noir_lsp::NargoLspService;
 use tower::ServiceBuilder;
@@ -24,7 +24,8 @@ pub(crate) fn run() -> Result<(), CliError> {
 
     runtime.block_on(async {
         let (server, _) = async_lsp::MainLoop::new_server(|client| {
-            let router = NargoLspService::new(&client, Bn254BlackBoxSolver);
+            let pedantic_solving = true;
+            let router = NargoLspService::new(&client, M31BlackBoxSolver(pedantic_solving));
 
             ServiceBuilder::new()
                 .layer(TracingLayer::default())
